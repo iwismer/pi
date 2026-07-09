@@ -16,9 +16,21 @@ import {
 	type TerminalColorScheme,
 } from "./terminal-colors.ts";
 import { deleteKittyImage, getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.ts";
-import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth, visibleWidth } from "./utils.ts";
+import {
+	extractAnsiCode,
+	extractSegments,
+	getGraphemeSegmenter,
+	normalizeTerminalOutput,
+	sliceByColumn,
+	sliceWithWidth,
+	visibleWidth,
+} from "./utils.ts";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
+const MULTI_CLICK_INTERVAL_MS = 500;
+const MOUSE_WHEEL_SCROLL_LINES = 3;
+const APP_VIEWPORT_SCROLLBAR_TRACK = "│";
+const APP_VIEWPORT_SCROLLBAR_THUMB = "█";
 
 interface KittyImageHeader {
 	ids: number[];
@@ -68,6 +80,15 @@ export interface Component {
 	 * @returns Array of strings, each representing a line
 	 */
 	render(width: number): string[];
+
+	/** Render the component with absolute terminal bounds for mouse hit-testing. */
+	renderWithBounds?(width: number, rowStart?: number, colStart?: number): string[];
+
+	/** Store the component's absolute terminal bounds for mouse hit-testing. */
+	setRenderBounds?(bounds: { rowStart: number; colStart: number; width: number; height: number }): void;
+
+	/** Optional handler for prompt-area mouse clicks. */
+	handlePromptMouseClick?(click: { row: number; col: number }): void;
 
 	/**
 	 * Optional handler for keyboard input when component has focus
@@ -162,6 +183,260 @@ function parseSizeValue(value: SizeValue | undefined, referenceSize: number): nu
 
 function isTermuxSession(): boolean {
 	return Boolean(process.env.TERMUX_VERSION);
+}
+
+export type SelectionPoint = {
+	bufferRow: number;
+	col: number;
+};
+
+export type SelectionRange = {
+	start: SelectionPoint;
+	end: SelectionPoint;
+	dragging: boolean;
+	moved: boolean;
+};
+
+export type CopyOptions = {
+	quiet?: boolean;
+};
+
+export type CopyRegion = {
+	bufferRow: number;
+	startCol: number;
+	endCol: number;
+	text: string;
+	onCopy?: () => void;
+};
+
+type InternalSelectionState = {
+	anchor: SelectionPoint;
+	extent: SelectionPoint;
+	dragging: boolean;
+	moved: boolean;
+};
+
+type SgrMouseEvent = {
+	buttonCode: number;
+	col: number;
+	row: number;
+	released: boolean;
+	motion: boolean;
+};
+
+function parseSgrMouseEvent(data: string): SgrMouseEvent | undefined {
+	const match = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])/.exec(data);
+	if (!match || match[0].length !== data.length) return undefined;
+	const buttonCode = Number.parseInt(match[1]!, 10);
+	const col = Number.parseInt(match[2]!, 10);
+	const row = Number.parseInt(match[3]!, 10);
+	if (!Number.isInteger(buttonCode) || !Number.isInteger(col) || !Number.isInteger(row) || col < 1 || row < 1) {
+		return undefined;
+	}
+	return {
+		buttonCode,
+		col,
+		row,
+		released: match[4] === "m",
+		motion: (buttonCode & 32) === 32,
+	};
+}
+
+function selectionPointFromMouse(event: SgrMouseEvent, viewportTop: number): SelectionPoint {
+	return { bufferRow: viewportTop + (event.row - 1), col: event.col - 1 };
+}
+
+function cloneSelectionPoint(point: SelectionPoint): SelectionPoint {
+	return { bufferRow: point.bufferRow, col: point.col };
+}
+
+function hasSelectionMoved(anchor: SelectionPoint, point: SelectionPoint): boolean {
+	return Math.abs(point.bufferRow - anchor.bufferRow) >= 1 || Math.abs(point.col - anchor.col) >= 2;
+}
+
+function appendScrollbarColumn(line: string, width: number, marker: string): string {
+	if (width <= 1) return line;
+	const bodyWidth = width - 1;
+	const body =
+		visibleWidth(line) > bodyWidth
+			? sliceByColumn(line, 0, bodyWidth, true) + "\x1b[0m\x1b]8;;\x07"
+			: line + " ".repeat(bodyWidth - visibleWidth(line));
+	return body + marker;
+}
+
+function renderAppViewportScrollbar(
+	lines: string[],
+	width: number,
+	totalLines: number,
+	viewportHeight: number,
+	viewportTop: number,
+): string[] {
+	const maxTop = Math.max(0, totalLines - viewportHeight);
+	if (width <= 1 || maxTop <= 0 || lines.length === 0) return lines;
+	const thumbHeight = Math.max(
+		1,
+		Math.min(viewportHeight, Math.floor((viewportHeight / totalLines) * viewportHeight)),
+	);
+	const maxThumbTop = Math.max(0, viewportHeight - thumbHeight);
+	const thumbTop = maxTop === 0 ? 0 : Math.min(maxThumbTop, Math.round((viewportTop / maxTop) * maxThumbTop));
+	return lines.map((line, row) => {
+		const inThumb = row >= thumbTop && row < thumbTop + thumbHeight;
+		return appendScrollbarColumn(line, width, inThumb ? APP_VIEWPORT_SCROLLBAR_THUMB : APP_VIEWPORT_SCROLLBAR_TRACK);
+	});
+}
+
+function normalizeSelectionRange(selection: InternalSelectionState): SelectionRange {
+	const anchor = selection.anchor;
+	const extent = selection.extent;
+	if (anchor.bufferRow < extent.bufferRow || (anchor.bufferRow === extent.bufferRow && anchor.col <= extent.col)) {
+		return {
+			start: cloneSelectionPoint(anchor),
+			end: cloneSelectionPoint(extent),
+			dragging: selection.dragging,
+			moved: selection.moved,
+		};
+	}
+	return {
+		start: cloneSelectionPoint(extent),
+		end: cloneSelectionPoint(anchor),
+		dragging: selection.dragging,
+		moved: selection.moved,
+	};
+}
+
+function renderedLinesEqual(a: string[], b: string[]): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i] !== b[i]) return false;
+	}
+	return true;
+}
+
+function stripAnsiCodes(text: string): string {
+	let result = "";
+	let i = 0;
+	while (i < text.length) {
+		const ansi = extractAnsiCode(text, i);
+		if (ansi) {
+			i += ansi.length;
+			continue;
+		}
+		result += text[i];
+		i++;
+	}
+	return result;
+}
+
+function stripControlCharacters(text: string): string {
+	// Remove any remaining C0 control characters (except tab) and DEL after escape sequences have been stripped.
+	// eslint-disable-next-line no-control-regex
+	return text.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, "");
+}
+
+function textColumnSegments(line: string): Array<{ segment: string; start: number; end: number; whitespace: boolean }> {
+	const plain = stripControlCharacters(stripAnsiCodes(line));
+	const segments: Array<{ segment: string; start: number; end: number; whitespace: boolean }> = [];
+	let currentCol = 0;
+	const segmenter = getGraphemeSegmenter();
+	for (const { segment } of segmenter.segment(plain)) {
+		const width = visibleWidth(segment);
+		const start = currentCol;
+		const end = currentCol + width;
+		if (width > 0) {
+			segments.push({ segment, start, end, whitespace: /\s/u.test(segment) });
+		}
+		currentCol = end;
+	}
+	return segments;
+}
+
+function selectedWordColumnBounds(line: string, col: number): { start: number; end: number } | null {
+	const lineWidth = visibleWidth(stripControlCharacters(stripAnsiCodes(line)));
+	if (col < 0 || col >= lineWidth) return null;
+	const segments = textColumnSegments(line);
+	const index = segments.findIndex((segment) => col >= segment.start && col < segment.end);
+	if (index === -1 || segments[index]!.whitespace) return null;
+	let first = index;
+	while (first > 0 && !segments[first - 1]!.whitespace) first--;
+	let last = index;
+	while (last + 1 < segments.length && !segments[last + 1]!.whitespace) last++;
+	return { start: segments[first]!.start, end: segments[last]!.end };
+}
+
+function nonWhitespaceColumnBounds(
+	segments: Array<{ segment: string; start: number; end: number; whitespace: boolean }>,
+	startIndex = 0,
+	endIndex = segments.length - 1,
+): { start: number; end: number } | null {
+	let first = -1;
+	for (let i = startIndex; i <= endIndex; i++) {
+		if (!segments[i]?.whitespace) {
+			first = i;
+			break;
+		}
+	}
+	if (first === -1) return null;
+	let last = endIndex;
+	while (last >= first && segments[last]!.whitespace) last--;
+	return { start: segments[first]!.start, end: segments[last]!.end };
+}
+
+function promptChromeTextColumnBounds(line: string): { start: number; end: number } | null {
+	const segments = textColumnSegments(line);
+	if (segments[0]?.segment !== "│") return null;
+	let rightBorder = -1;
+	for (let i = segments.length - 1; i > 0; i--) {
+		if (segments[i]!.segment === "│") {
+			rightBorder = i;
+			break;
+		}
+	}
+	if (rightBorder <= 0) return null;
+	return nonWhitespaceColumnBounds(segments, 1, rightBorder - 1) ?? { start: segments[0]!.end, end: segments[0]!.end };
+}
+
+function selectedLineTextColumnBounds(line: string): { start: number; end: number } | null {
+	return promptChromeTextColumnBounds(line) ?? nonWhitespaceColumnBounds(textColumnSegments(line));
+}
+
+function selectedColumnBounds(
+	line: string,
+	startCol: number,
+	endCol: number,
+): { start: number; end: number; lineWidth: number } | null {
+	const lineWidth = visibleWidth(line);
+	const start = Math.max(0, Math.min(startCol, lineWidth));
+	const end = Math.max(start, Math.min(endCol, lineWidth));
+	if (end <= start) return null;
+	let currentCol = 0;
+	let adjustedStart: number | null = null;
+	let adjustedEnd: number | null = null;
+	let i = 0;
+	const segmenter = getGraphemeSegmenter();
+	while (i < line.length) {
+		const ansi = extractAnsiCode(line, i);
+		if (ansi) {
+			i += ansi.length;
+			continue;
+		}
+		let textEnd = i;
+		while (textEnd < line.length && !extractAnsiCode(line, textEnd)) textEnd++;
+		for (const { segment } of segmenter.segment(line.slice(i, textEnd))) {
+			const width = visibleWidth(segment);
+			const segmentStart = currentCol;
+			const segmentEnd = currentCol + width;
+			if (segmentStart < end && segmentEnd > start) {
+				if (adjustedStart === null) adjustedStart = segmentStart;
+				adjustedEnd = segmentEnd;
+			}
+			currentCol = segmentEnd;
+			if (currentCol >= end && adjustedEnd !== null) break;
+		}
+		i = textEnd;
+		if (currentCol >= end && adjustedEnd !== null) break;
+	}
+	if (adjustedStart === null || adjustedEnd === null || adjustedEnd <= adjustedStart) return null;
+	return { start: adjustedStart, end: adjustedEnd, lineWidth };
 }
 
 /**
@@ -278,12 +553,31 @@ export class Container implements Component {
 	}
 
 	render(width: number): string[] {
+		return this.renderWithBounds(width, 1, 1);
+	}
+
+	private renderChildWithBounds(child: Component, width: number, row: number, col: number): string[] {
+		const inheritedContainerBounds =
+			child instanceof Container &&
+			child.renderWithBounds === Container.prototype.renderWithBounds &&
+			child.render !== Container.prototype.render;
+		if (child.renderWithBounds && !inheritedContainerBounds) {
+			return child.renderWithBounds(width, row, col);
+		}
+		return child.render(width);
+	}
+
+	renderWithBounds(width: number, rowStart = 1, colStart = 1): string[] {
 		const lines: string[] = [];
+		let row = rowStart;
 		for (const child of this.children) {
-			const childLines = child.render(width);
+			child.setRenderBounds?.({ rowStart: row, colStart, width, height: 0 });
+			const childLines = this.renderChildWithBounds(child, width, row, colStart);
+			child.setRenderBounds?.({ rowStart: row, colStart, width, height: childLines.length });
 			for (const line of childLines) {
 				lines.push(line);
 			}
+			row += childLines.length;
 		}
 		return lines;
 	}
@@ -295,6 +589,7 @@ export class Container implements Component {
 export class TUI extends Container {
 	public terminal: Terminal;
 	private previousLines: string[] = [];
+	private lastPlainRenderedLines: string[] = [];
 	private previousKittyImageIds = new Set<number>();
 	private previousWidth = 0;
 	private previousHeight = 0;
@@ -303,6 +598,8 @@ export class TUI extends Container {
 
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	public onDebug?: () => void;
+	/** Async-safe hook invoked once with cleaned selected text when a mouse release finalizes a non-empty selection. */
+	public onSelectionCopy?: (text: string, options?: CopyOptions) => void | Promise<void>;
 	private renderRequested = false;
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
@@ -313,6 +610,22 @@ export class TUI extends Container {
 	private clearOnShrink = process.env.PI_CLEAR_ON_SHRINK === "1"; // Clear empty rows when content shrinks (default: off)
 	private maxLinesRendered = 0; // Track terminal's working area (max lines ever rendered)
 	private previousViewportTop = 0; // Track previous viewport top for resize-aware cursor moves
+	private mouseInitialFullRedrawPending = process.env.PI_PROMPT_MOUSE === "1";
+	private pendingMousePress: {
+		button: "left";
+		row: number;
+		col: number;
+		clickRow: number;
+		clickCol: number;
+		anchor: SelectionPoint;
+	} | null = null;
+	private selectionState: InternalSelectionState | null = null;
+	private lastMouseClick: { point: SelectionPoint; time: number; count: number } | null = null;
+	private copyRegions: CopyRegion[] = [];
+	private appViewportTop: number | null = null;
+	private lastRenderedLineCount = 0;
+	private lastRenderUsedAppViewport = false;
+	private forceViewportFullRedraw = false;
 	private fullRedrawCount = 0;
 	private stopped = false;
 	private pendingOsc11BackgroundReplies = 0;
@@ -352,6 +665,145 @@ export class TUI extends Container {
 
 	getClearOnShrink(): boolean {
 		return this.clearOnShrink;
+	}
+
+	getViewportTop(): number {
+		return this.previousViewportTop;
+	}
+
+	getSelection(): SelectionRange | null {
+		if (!this.selectionState?.moved) return null;
+		const range = normalizeSelectionRange(this.selectionState);
+		if (range.start.bufferRow === range.end.bufferRow && range.start.col === range.end.col) return null;
+		return range;
+	}
+
+	getSelectedText(): string | null {
+		const selection = this.getSelection();
+		if (!selection) return null;
+		const lines = this.lastPlainRenderedLines;
+		const firstRow = Math.max(selection.start.bufferRow, 0);
+		const lastRow = Math.min(selection.end.bufferRow, lines.length - 1);
+		if (firstRow > lastRow) return null;
+		const rows: string[] = [];
+		for (let row = firstRow; row <= lastRow; row++) {
+			const plain = stripControlCharacters(stripAnsiCodes(lines[row]!));
+			const lineWidth = visibleWidth(plain);
+			let startCol = row === selection.start.bufferRow ? selection.start.col : 0;
+			let endCol = row === selection.end.bufferRow ? selection.end.col : lineWidth;
+			const chromeBounds = promptChromeTextColumnBounds(plain);
+			if (chromeBounds) {
+				startCol = Math.max(startCol, chromeBounds.start);
+				endCol = Math.min(endCol, chromeBounds.end);
+			}
+			let text = "";
+			const bounds = selectedColumnBounds(plain, startCol, endCol);
+			if (bounds) {
+				text = sliceByColumn(plain, bounds.start, bounds.end - bounds.start);
+			}
+			const reachesVisibleEnd = endCol >= lineWidth;
+			rows.push(reachesVisibleEnd ? text.replace(/\s+$/, "") : text);
+		}
+		return rows.join("\n").trim();
+	}
+
+	registerCopyRegion(region: CopyRegion): void {
+		if (!region.text?.trim()) return;
+		if (region.endCol <= region.startCol) return;
+		this.copyRegions.push({ ...region, text: region.text.trim() });
+	}
+
+	private notifySelectionCopy(): void {
+		const text = this.getSelectedText();
+		this.notifyCopyText(text);
+	}
+
+	private notifyCopyText(text: string | null | undefined, onSuccess?: () => void, options?: CopyOptions): void {
+		if (typeof this.onSelectionCopy !== "function") return;
+		if (!text) return;
+		const runCopyHook = () => {
+			try {
+				const result = this.onSelectionCopy?.(text, options);
+				Promise.resolve(result)
+					.then(() => {
+						onSuccess?.();
+					})
+					.catch(() => {
+						// Copy success/failure UX is owned by the embedding app; the TUI must never leak an unhandled rejection.
+					});
+			} catch {
+				// A throwing copy hook must never crash input handling.
+			}
+		};
+		if (typeof queueMicrotask === "function") {
+			queueMicrotask(runCopyHook);
+		} else {
+			Promise.resolve().then(runCopyHook);
+		}
+	}
+
+	private clearCopyRegions(): void {
+		this.copyRegions = [];
+	}
+
+	private copyRegionAt(point: SelectionPoint): CopyRegion | undefined {
+		return this.copyRegions.find(
+			(region) => region.bufferRow === point.bufferRow && point.col >= region.startCol && point.col < region.endCol,
+		);
+	}
+
+	private clearSelection(requestRender = true): void {
+		const hadSelection = this.selectionState !== null;
+		this.selectionState = null;
+		this.pendingMousePress = null;
+		if (hadSelection && requestRender) this.requestRender();
+	}
+
+	private recordMouseClick(point: SelectionPoint): number {
+		const now = performance.now();
+		const previous = this.lastMouseClick;
+		const sameCell = previous && previous.point.bufferRow === point.bufferRow && previous.point.col === point.col;
+		const count = sameCell && now - previous.time <= MULTI_CLICK_INTERVAL_MS ? Math.min(previous.count + 1, 3) : 1;
+		this.lastMouseClick = { point: cloneSelectionPoint(point), time: now, count };
+		return count;
+	}
+
+	private selectWordAtPoint(point: SelectionPoint): boolean {
+		const line = this.lastPlainRenderedLines[point.bufferRow];
+		if (line === undefined) return false;
+		const bounds = selectedWordColumnBounds(line, point.col);
+		if (!bounds) {
+			this.selectionState = null;
+			return false;
+		}
+		this.selectionState = {
+			anchor: { bufferRow: point.bufferRow, col: bounds.start },
+			extent: { bufferRow: point.bufferRow, col: bounds.end },
+			dragging: false,
+			moved: true,
+		};
+		this.requestRender();
+		this.notifySelectionCopy();
+		return true;
+	}
+
+	private selectLineAtPoint(point: SelectionPoint): boolean {
+		const line = this.lastPlainRenderedLines[point.bufferRow];
+		if (line === undefined) return false;
+		const bounds = selectedLineTextColumnBounds(line);
+		if (!bounds) {
+			this.selectionState = null;
+			return false;
+		}
+		this.selectionState = {
+			anchor: { bufferRow: point.bufferRow, col: bounds.start },
+			extent: { bufferRow: point.bufferRow, col: bounds.end },
+			dragging: false,
+			moved: true,
+		};
+		this.requestRender();
+		this.notifySelectionCopy();
+		return true;
 	}
 
 	/**
@@ -765,6 +1217,15 @@ export class TUI extends Container {
 		if (this.consumeTerminalColorSchemeReport(data)) {
 			return;
 		}
+		if (this.consumeCellSizeResponse(data)) {
+			return;
+		}
+		if (this.consumeSgrMouseEvent(data)) {
+			return;
+		}
+		if (this.selectionState) {
+			this.clearSelection();
+		}
 
 		if (this.inputListeners.size > 0) {
 			let current = data;
@@ -781,11 +1242,6 @@ export class TUI extends Container {
 				return;
 			}
 			data = current;
-		}
-
-		// Consume terminal cell size responses without blocking unrelated input.
-		if (this.consumeCellSizeResponse(data)) {
-			return;
 		}
 
 		// Global debug key handler (Shift+Ctrl+D)
@@ -867,6 +1323,144 @@ export class TUI extends Container {
 		for (const listener of this.terminalColorSchemeListeners) {
 			listener(scheme);
 		}
+		return true;
+	}
+
+	private getMaxAppViewportTop(totalLines = this.lastRenderedLineCount, height = this.terminal.rows): number {
+		return Math.max(0, totalLines - height);
+	}
+
+	private clampAppViewportTop(totalLines = this.lastRenderedLineCount, height = this.terminal.rows): number {
+		const maxTop = this.getMaxAppViewportTop(totalLines, height);
+		if (this.appViewportTop === null) return maxTop;
+		// Clamp only; content shrink must not silently switch to follow-bottom.
+		// A bottom-of-buffer shrink (for example a widget dock hiding) should keep
+		// the user's anchored content stable and render blank rows below the remaining
+		// content as long as at least half a screen of content stays visible.
+		const minVisibleRows = Math.min(totalLines, Math.ceil(height / 2));
+		const stickyMaxTop = Math.max(maxTop, totalLines - minVisibleRows);
+		this.appViewportTop = Math.max(0, Math.min(this.appViewportTop, stickyMaxTop));
+		return this.appViewportTop;
+	}
+
+	private getAppViewportTop(totalLines: number, height: number): number {
+		return this.clampAppViewportTop(totalLines, height);
+	}
+
+	private scrollViewportBy(deltaRows: number): boolean {
+		if (this.overlayStack.length > 0) return false;
+		const maxTop = this.getMaxAppViewportTop();
+		if (this.appViewportTop === null && maxTop <= 0) return false;
+		// currentTop may sit above maxTop while overscrolled after a bottom shrink;
+		// wheel-up moves relative to it (no snap), wheel-down still bottoms out at maxTop.
+		const currentTop = this.appViewportTop === null ? maxTop : this.appViewportTop;
+		let nextTop = Math.max(0, currentTop + deltaRows);
+		if (deltaRows > 0) {
+			nextTop = Math.min(nextTop, maxTop);
+		} else {
+			nextTop = Math.min(nextTop, Math.max(maxTop, currentTop));
+		}
+		const nextViewportTop = deltaRows > 0 && nextTop >= maxTop ? null : nextTop;
+		if (nextViewportTop === this.appViewportTop) return false;
+		this.appViewportTop = nextViewportTop;
+		this.pendingMousePress = null;
+		this.lastMouseClick = null;
+		this.selectionState = null;
+		this.forceViewportFullRedraw = true;
+		this.requestRender();
+		return true;
+	}
+
+	private consumeSgrMouseEvent(data: string): boolean {
+		const event = parseSgrMouseEvent(data);
+		if (!event) return false;
+		if (event.buttonCode === 64 || event.buttonCode === 65) {
+			const delta = event.buttonCode === 64 ? -MOUSE_WHEEL_SCROLL_LINES : MOUSE_WHEEL_SCROLL_LINES;
+			this.scrollViewportBy(delta);
+			return true;
+		}
+		if (event.released) {
+			const press = this.pendingMousePress;
+			this.pendingMousePress = null;
+			if (event.buttonCode === 0 && press?.button === "left") {
+				const point = selectionPointFromMouse(event, this.getViewportTop());
+				const moved = hasSelectionMoved(press.anchor, point) || this.selectionState?.moved === true;
+				if (moved) {
+					if (point.bufferRow === press.anchor.bufferRow && point.col === press.anchor.col) {
+						this.selectionState = null;
+						this.requestRender();
+					} else {
+						this.lastMouseClick = null;
+						this.selectionState = {
+							anchor: cloneSelectionPoint(press.anchor),
+							extent: point,
+							dragging: false,
+							moved: true,
+						};
+						this.requestRender();
+						this.notifySelectionCopy();
+					}
+				} else {
+					const copyRegion = this.copyRegionAt(press.anchor);
+					if (copyRegion) {
+						this.selectionState = null;
+						this.notifyCopyText(copyRegion.text, copyRegion.onCopy, { quiet: true });
+						return true;
+					}
+					const clickCount = this.recordMouseClick(press.anchor);
+					if (clickCount >= 3) {
+						this.selectLineAtPoint(press.anchor);
+					} else if (clickCount === 2) {
+						this.selectWordAtPoint(press.anchor);
+					} else {
+						this.selectionState = null;
+						const handler = this.focusedComponent?.handlePromptMouseClick;
+						if (typeof handler === "function") {
+							handler.call(this.focusedComponent, { row: press.clickRow, col: press.clickCol });
+							this.requestRender();
+						}
+					}
+				}
+			}
+			return true;
+		}
+		if (event.motion) {
+			const press = this.pendingMousePress;
+			if (press?.button === "left") {
+				const point = selectionPointFromMouse(event, this.getViewportTop());
+				if (hasSelectionMoved(press.anchor, point) || this.selectionState?.moved) {
+					this.selectionState = {
+						anchor: cloneSelectionPoint(press.anchor),
+						extent: point,
+						dragging: true,
+						moved: true,
+					};
+					this.requestRender();
+				}
+			}
+			return true;
+		}
+		if (event.buttonCode === 0) {
+			this.clearSelection(true);
+			const anchor = selectionPointFromMouse(event, this.getViewportTop());
+			this.pendingMousePress = {
+				button: "left",
+				row: event.row,
+				col: event.col,
+				clickRow: event.row,
+				clickCol: event.col,
+				anchor,
+			};
+			this.selectionState = {
+				anchor: cloneSelectionPoint(anchor),
+				extent: cloneSelectionPoint(anchor),
+				dragging: true,
+				moved: false,
+			};
+			return true;
+		}
+		this.pendingMousePress = null;
+		this.lastMouseClick = null;
 		return true;
 	}
 
@@ -1223,18 +1817,76 @@ export class TUI extends Container {
 		return sliceByColumn(result, 0, totalWidth, true);
 	}
 
+	private getImageReservedRowsToSkip(lines: string[]): Set<number> {
+		const rows = new Set<number>();
+		for (let i = 0; i < lines.length; i++) {
+			if (!isImageLine(lines[i]!)) continue;
+			const reservedRows = this.getKittyImageReservedRows(lines, i);
+			for (let row = 0; row < reservedRows; row++) rows.add(i + row);
+			i += reservedRows - 1;
+		}
+		return rows;
+	}
+
+	private highlightSelectionInLine(line: string, startCol: number, endCol: number, maxWidth: number): string {
+		const bounds = selectedColumnBounds(line, startCol, endCol);
+		if (!bounds) return line;
+		const before = sliceByColumn(line, 0, bounds.start, true);
+		const selected = sliceWithWidth(line, bounds.start, bounds.end - bounds.start, true);
+		const after = sliceByColumn(line, bounds.end, Math.max(0, bounds.lineWidth - bounds.end), true);
+		let result = `${before}\x1b[0m\x1b[7m${stripAnsiCodes(selected.text)}\x1b[0m${after}`;
+		const targetWidth = Math.min(bounds.lineWidth, maxWidth);
+		const resultWidth = visibleWidth(result);
+		if (resultWidth > targetWidth) {
+			result = sliceByColumn(result, 0, targetWidth, true);
+		} else if (resultWidth < targetWidth) {
+			result += " ".repeat(targetWidth - resultWidth);
+		}
+		return result;
+	}
+
+	private applySelectionHighlight(lines: string[], maxWidth: number): string[] {
+		const selection = this.getSelection();
+		if (!selection) return lines;
+		const result = [...lines];
+		const firstRow = Math.max(selection.start.bufferRow, 0);
+		const lastRow = Math.min(selection.end.bufferRow, result.length - 1);
+		if (firstRow > lastRow) return result;
+		const skippedRows = this.getImageReservedRowsToSkip(lines);
+		for (let row = firstRow; row <= lastRow; row++) {
+			if (skippedRows.has(row)) continue;
+			const line = result[row]!;
+			const lineWidth = Math.min(visibleWidth(line), maxWidth);
+			let startCol = row === selection.start.bufferRow ? selection.start.col : 0;
+			let endCol = row === selection.end.bufferRow ? selection.end.col : lineWidth;
+			const chromeBounds = promptChromeTextColumnBounds(line);
+			if (chromeBounds) {
+				startCol = Math.max(startCol, chromeBounds.start);
+				endCol = Math.min(endCol, chromeBounds.end);
+			}
+			if (endCol <= startCol) continue;
+			result[row] = this.highlightSelectionInLine(line, startCol, endCol, maxWidth);
+		}
+		return result;
+	}
+
 	/**
 	 * Find and extract cursor position from rendered lines.
 	 * Searches for CURSOR_MARKER, calculates its position, and strips it from the output.
-	 * Only scans the bottom terminal height lines (visible viewport).
+	 * Scans the active terminal viewport.
 	 * @param lines - Rendered lines to search
 	 * @param height - Terminal height (visible viewport size)
+	 * @param searchTop - Full-buffer row where the active viewport starts
 	 * @returns Cursor position { row, col } or null if no marker found
 	 */
-	private extractCursorPosition(lines: string[], height: number): { row: number; col: number } | null {
-		// Only scan the bottom `height` lines (visible viewport)
-		const viewportTop = Math.max(0, lines.length - height);
-		for (let row = lines.length - 1; row >= viewportTop; row--) {
+	private extractCursorPosition(
+		lines: string[],
+		height: number,
+		searchTop = Math.max(0, lines.length - height),
+	): { row: number; col: number } | null {
+		const viewportTop = Math.max(0, Math.min(searchTop, lines.length));
+		const viewportBottom = Math.min(lines.length - 1, viewportTop + height - 1);
+		for (let row = viewportBottom; row >= viewportTop; row--) {
 			const line = lines[row];
 			const markerIndex = line.indexOf(CURSOR_MARKER);
 			if (markerIndex !== -1) {
@@ -1255,6 +1907,7 @@ export class TUI extends Container {
 		if (this.stopped) return;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
+		this.clearCopyRegions();
 		const widthChanged = this.previousWidth !== 0 && this.previousWidth !== width;
 		const heightChanged = this.previousHeight !== 0 && this.previousHeight !== height;
 		const previousBufferLength = this.previousHeight > 0 ? this.previousViewportTop + this.previousHeight : height;
@@ -1270,23 +1923,42 @@ export class TUI extends Container {
 		// Render all components to get new lines
 		let newLines = this.render(width);
 
+		// A visible overlay is composited against the bottom of the buffer, so it must never be hidden behind a scrolled-up app viewport.
+		if (this.appViewportTop !== null && this.overlayStack.length > 0) {
+			this.appViewportTop = null;
+			this.forceViewportFullRedraw = true;
+		}
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.overlayStack.length > 0) {
 			newLines = this.compositeOverlays(newLines, width, height);
 		}
+		this.lastRenderedLineCount = newLines.length;
+		this.clampAppViewportTop(newLines.length, height);
 
 		// Extract cursor position before applying line resets (marker must be found first)
-		const cursorPos = this.extractCursorPosition(newLines, height);
+		const cursorSearchTop = this.appViewportTop ?? Math.max(0, newLines.length - height);
+		const cursorPos = this.extractCursorPosition(newLines, height, cursorSearchTop);
+		const plainRenderedLines = [...newLines];
+		if (this.selectionState) {
+			const renderedContentChanged =
+				this.lastPlainRenderedLines.length > 0 &&
+				!renderedLinesEqual(this.lastPlainRenderedLines, plainRenderedLines);
+			if (widthChanged || heightChanged || renderedContentChanged) {
+				this.clearSelection(false);
+			}
+		}
+		this.lastPlainRenderedLines = [...plainRenderedLines];
+		newLines = this.applySelectionHighlight([...plainRenderedLines], width);
 
 		newLines = this.applyLineResets(newLines);
 
 		// Helper to clear scrollback and viewport and render all new lines
-		const fullRender = (clear: boolean): void => {
+		const fullRender = (clear: boolean, preserveScrollback = false): void => {
 			this.fullRedrawCount += 1;
 			let buffer = "\x1b[?2026h"; // Begin synchronized output
 			if (clear) {
 				buffer += this.deleteKittyImages(this.previousKittyImageIds);
-				buffer += "\x1b[2J\x1b[H\x1b[3J"; // Clear screen, home, then clear scrollback
+				buffer += preserveScrollback ? "\x1b[2J\x1b[H" : "\x1b[2J\x1b[H\x1b[3J"; // Clear screen, home, then optionally clear scrollback
 			}
 			for (let i = 0; i < newLines.length; i++) {
 				if (i > 0) buffer += "\r\n";
@@ -1322,6 +1994,52 @@ export class TUI extends Container {
 			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 			this.previousWidth = width;
 			this.previousHeight = height;
+			this.lastRenderUsedAppViewport = false;
+			this.forceViewportFullRedraw = false;
+		};
+
+		const fullViewportRender = (): void => {
+			const appViewportTop = this.getAppViewportTop(newLines.length, height);
+			let visibleLines = newLines
+				.slice(appViewportTop, appViewportTop + height)
+				.map((line) => (isImageLine(line) ? "" : line));
+			while (visibleLines.length < height) visibleLines.push("");
+			visibleLines = renderAppViewportScrollbar(visibleLines, width, newLines.length, height, appViewportTop);
+			if (
+				this.lastRenderUsedAppViewport &&
+				!this.forceViewportFullRedraw &&
+				this.previousWidth === width &&
+				this.previousHeight === height &&
+				renderedLinesEqual(this.previousLines, visibleLines)
+			) {
+				this.previousViewportTop = appViewportTop;
+				return;
+			}
+			this.fullRedrawCount += 1;
+			let buffer = "\x1b[?2026h";
+			buffer += this.deleteKittyImages(this.previousKittyImageIds);
+			buffer += "\x1b[2J\x1b[H";
+			for (let i = 0; i < visibleLines.length; i++) {
+				if (i > 0) buffer += "\r\n";
+				buffer += visibleLines[i];
+			}
+			buffer += "\x1b[?2026l";
+			this.terminal.write(buffer);
+			this.cursorRow = Math.max(0, visibleLines.length - 1);
+			this.hardwareCursorRow = this.cursorRow;
+			this.maxLinesRendered = Math.max(this.maxLinesRendered, visibleLines.length);
+			this.previousViewportTop = appViewportTop;
+			const viewportCursorPos =
+				cursorPos && cursorPos.row >= appViewportTop && cursorPos.row < appViewportTop + height
+					? { row: cursorPos.row - appViewportTop, col: cursorPos.col }
+					: null;
+			this.positionHardwareCursor(viewportCursorPos, visibleLines.length);
+			this.previousLines = visibleLines;
+			this.previousKittyImageIds = this.collectKittyImageIds(visibleLines);
+			this.previousWidth = width;
+			this.previousHeight = height;
+			this.lastRenderUsedAppViewport = true;
+			this.forceViewportFullRedraw = false;
 		};
 
 		const debugRedraw = process.env.PI_DEBUG_REDRAW === "1";
@@ -1332,10 +2050,20 @@ export class TUI extends Container {
 			fs.appendFileSync(logPath, msg);
 		};
 
-		// First render - just output everything without clearing (assumes clean screen)
+		if (this.appViewportTop !== null) {
+			fullViewportRender();
+			return;
+		}
+		if (this.forceViewportFullRedraw || this.lastRenderUsedAppViewport) {
+			fullRender(true, true);
+			return;
+		}
+		// First render - just output everything without clearing unless mouse mode needs a known screen origin.
 		if (this.previousLines.length === 0 && !widthChanged && !heightChanged) {
 			logRedraw("first render");
-			fullRender(false);
+			const clearForMouseOrigin = this.mouseInitialFullRedrawPending;
+			this.mouseInitialFullRedrawPending = false;
+			fullRender(clearForMouseOrigin, clearForMouseOrigin);
 			return;
 		}
 

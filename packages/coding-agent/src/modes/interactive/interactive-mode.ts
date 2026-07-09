@@ -109,6 +109,7 @@ import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
+import { CopyableBlockComponent } from "./components/copyable-block.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomEntryComponent } from "./components/custom-entry.ts";
 import { CustomMessageComponent } from "./components/custom-message.ts";
@@ -380,7 +381,9 @@ export class InteractiveMode {
 
 	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
+	private streamingBlock: CopyableBlockComponent | undefined = undefined;
 	private streamingMessage: AssistantMessage | undefined = undefined;
+	private streamingCopyState: { text: string } | undefined = undefined;
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
@@ -475,6 +478,16 @@ export class InteractiveMode {
 		this.version = VERSION;
 		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
+		this.ui.onSelectionCopy = async (text, options) => {
+			try {
+				await copyToClipboard(text);
+				if (!options?.quiet) {
+					this.showStatus("Copied selection");
+				}
+			} catch (error) {
+				this.showError(`Failed to copy selection: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		};
 		this.headerContainer = new Container();
 		this.loadedResourcesContainer = new Container();
 		this.chatContainer = new Container();
@@ -1751,7 +1764,9 @@ export class InteractiveMode {
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
+		this.streamingBlock = undefined;
 		this.streamingMessage = undefined;
+		this.streamingCopyState = undefined;
 		this.pendingTools.clear();
 		this.renderInitialMessages();
 	}
@@ -1878,8 +1893,9 @@ export class InteractiveMode {
 	private setHiddenThinkingLabel(label?: string): void {
 		this.hiddenThinkingLabel = label ?? this.defaultHiddenThinkingLabel;
 		for (const child of this.chatContainer.children) {
-			if (child instanceof AssistantMessageComponent) {
-				child.setHiddenThinkingLabel(this.hiddenThinkingLabel);
+			const component = this.unwrapCopyableBlock(child);
+			if (component instanceof AssistantMessageComponent) {
+				component.setHiddenThinkingLabel(this.hiddenThinkingLabel);
 			}
 		}
 		if (this.streamingComponent) {
@@ -2894,7 +2910,10 @@ export class InteractiveMode {
 						this.outputPad,
 					);
 					this.streamingMessage = event.message;
-					this.chatContainer.addChild(this.streamingComponent);
+					const copyState = { text: this.getAssistantMessageCopyText(event.message) };
+					this.streamingCopyState = copyState;
+					this.streamingBlock = this.makeCopyableBlock(this.streamingComponent, () => copyState.text);
+					this.chatContainer.addChild(this.streamingBlock);
 					this.streamingComponent.updateContent(this.streamingMessage);
 					this.ui.requestRender();
 				}
@@ -2903,6 +2922,9 @@ export class InteractiveMode {
 			case "message_update":
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
+					if (this.streamingCopyState) {
+						this.streamingCopyState.text = this.getAssistantMessageCopyText(event.message);
+					}
 					this.streamingComponent.updateContent(this.streamingMessage);
 
 					for (const content of this.streamingMessage.content) {
@@ -2921,7 +2943,9 @@ export class InteractiveMode {
 									this.sessionManager.getCwd(),
 								);
 								component.setExpanded(this.toolOutputExpanded);
-								this.chatContainer.addChild(component);
+								this.chatContainer.addChild(
+									this.makeCopyableBlock(component, () => component.getTextOutput?.() ?? ""),
+								);
 								this.pendingTools.set(content.id, component);
 							} else {
 								const component = this.pendingTools.get(content.id);
@@ -2939,6 +2963,9 @@ export class InteractiveMode {
 				if (event.message.role === "user") break;
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
+					if (this.streamingCopyState) {
+						this.streamingCopyState.text = this.getAssistantMessageCopyText(event.message);
+					}
 					let errorMessage: string | undefined;
 					if (this.streamingMessage.stopReason === "aborted") {
 						const retryAttempt = this.session.retryAttempt;
@@ -2969,7 +2996,9 @@ export class InteractiveMode {
 						this.maybeShowCacheMissNotice(this.streamingMessage);
 					}
 					this.streamingComponent = undefined;
+					this.streamingBlock = undefined;
 					this.streamingMessage = undefined;
+					this.streamingCopyState = undefined;
 					this.footer.invalidate();
 				}
 				this.ui.requestRender();
@@ -2991,10 +3020,14 @@ export class InteractiveMode {
 						this.sessionManager.getCwd(),
 					);
 					component.setExpanded(this.toolOutputExpanded);
-					this.chatContainer.addChild(component);
-					this.pendingTools.set(event.toolCallId, component);
+					const newComponent = component;
+					this.chatContainer.addChild(
+						this.makeCopyableBlock(newComponent, () => newComponent.getTextOutput?.() ?? ""),
+					);
+					this.pendingTools.set(event.toolCallId, newComponent);
 				}
-				component.markExecutionStarted();
+				const toolComponent = component;
+				toolComponent.markExecutionStarted();
 				this.ui.requestRender();
 				break;
 			}
@@ -3024,9 +3057,11 @@ export class InteractiveMode {
 				}
 				this.clearStatusIndicator("working");
 				if (this.streamingComponent) {
-					this.chatContainer.removeChild(this.streamingComponent);
+					this.chatContainer.removeChild(this.streamingBlock ?? this.streamingComponent);
 					this.streamingComponent = undefined;
+					this.streamingBlock = undefined;
 					this.streamingMessage = undefined;
+					this.streamingCopyState = undefined;
 				}
 				this.pendingTools.clear();
 
@@ -3130,6 +3165,25 @@ export class InteractiveMode {
 		return textBlocks.map((c) => (c as { text: string }).text).join("");
 	}
 
+	private getAssistantMessageCopyText(message: Message): string {
+		if (message.role !== "assistant") return "";
+		return message.content
+			.filter(
+				(content): content is Extract<(typeof message.content)[number], { type: "text" }> =>
+					content.type === "text" && content.text.trim().length > 0,
+			)
+			.map((content) => content.text.trim())
+			.join("\n\n");
+	}
+
+	private makeCopyableBlock(component: Component, getCopyText: () => string): CopyableBlockComponent {
+		return new CopyableBlockComponent(component, this.ui, getCopyText);
+	}
+
+	private unwrapCopyableBlock(component: Component): Component {
+		return component instanceof CopyableBlockComponent ? component.child : component;
+	}
+
 	/**
 	 * Show a status message in the chat.
 	 *
@@ -3168,7 +3222,7 @@ export class InteractiveMode {
 		}
 
 		if (this.streamingComponent) {
-			const streamingIndex = this.chatContainer.children.indexOf(this.streamingComponent);
+			const streamingIndex = this.chatContainer.children.indexOf(this.streamingBlock ?? this.streamingComponent);
 			if (streamingIndex >= 0) {
 				this.chatContainer.children.splice(streamingIndex, 0, component);
 				return;
@@ -3234,13 +3288,14 @@ export class InteractiveMode {
 						this.chatContainer.addChild(component);
 						// Render user message separately if present
 						if (skillBlock.userMessage) {
+							const userMessage = skillBlock.userMessage;
 							this.chatContainer.addChild(new Spacer(1));
 							const userComponent = new UserMessageComponent(
-								skillBlock.userMessage,
+								userMessage,
 								this.getMarkdownThemeWithSettings(),
 								this.outputPad,
 							);
-							this.chatContainer.addChild(userComponent);
+							this.chatContainer.addChild(this.makeCopyableBlock(userComponent, () => userMessage));
 						}
 					} else {
 						const userComponent = new UserMessageComponent(
@@ -3248,7 +3303,7 @@ export class InteractiveMode {
 							this.getMarkdownThemeWithSettings(),
 							this.outputPad,
 						);
-						this.chatContainer.addChild(userComponent);
+						this.chatContainer.addChild(this.makeCopyableBlock(userComponent, () => textContent));
 					}
 					if (options?.populateHistory) {
 						this.editor.addToHistory?.(textContent);
@@ -3264,7 +3319,9 @@ export class InteractiveMode {
 					this.hiddenThinkingLabel,
 					this.outputPad,
 				);
-				this.chatContainer.addChild(assistantComponent);
+				this.chatContainer.addChild(
+					this.makeCopyableBlock(assistantComponent, () => this.getAssistantMessageCopyText(message)),
+				);
 				break;
 			}
 			case "toolResult": {
@@ -3320,7 +3377,9 @@ export class InteractiveMode {
 							this.sessionManager.getCwd(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
+						this.chatContainer.addChild(
+							this.makeCopyableBlock(component, () => component.getTextOutput?.() ?? ""),
+						);
 
 						if (message.stopReason === "aborted" || message.stopReason === "error") {
 							let errorMessage: string;
@@ -3757,8 +3816,9 @@ export class InteractiveMode {
 		}
 		for (const container of [this.loadedResourcesContainer, this.chatContainer]) {
 			for (const child of container.children) {
-				if (isExpandable(child)) {
-					child.setExpanded(expanded);
+				const component = this.unwrapCopyableBlock(child);
+				if (isExpandable(component)) {
+					component.setExpanded(expanded);
 				}
 			}
 		}
@@ -3777,7 +3837,15 @@ export class InteractiveMode {
 		if (this.streamingComponent && this.streamingMessage) {
 			this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
 			this.streamingComponent.updateContent(this.streamingMessage);
-			this.chatContainer.addChild(this.streamingComponent);
+			if (this.streamingCopyState) {
+				this.streamingCopyState.text = this.getAssistantMessageCopyText(this.streamingMessage);
+			}
+			if (!this.streamingBlock) {
+				const copyState = { text: this.getAssistantMessageCopyText(this.streamingMessage) };
+				this.streamingCopyState = copyState;
+				this.streamingBlock = this.makeCopyableBlock(this.streamingComponent, () => copyState.text);
+			}
+			this.chatContainer.addChild(this.streamingBlock);
 		}
 
 		this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
@@ -4150,16 +4218,18 @@ export class InteractiveMode {
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
-								child.setShowImages(enabled);
+							const component = this.unwrapCopyableBlock(child);
+							if (component instanceof ToolExecutionComponent) {
+								component.setShowImages(enabled);
 							}
 						}
 					},
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
-								child.setImageWidthCells(width);
+							const component = this.unwrapCopyableBlock(child);
+							if (component instanceof ToolExecutionComponent) {
+								component.setImageWidthCells(width);
 							}
 						}
 					},
@@ -4202,8 +4272,9 @@ export class InteractiveMode {
 						this.hideThinkingBlock = hidden;
 						this.settingsManager.setHideThinkingBlock(hidden);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof AssistantMessageComponent) {
-								child.setHideThinkingBlock(hidden);
+							const component = this.unwrapCopyableBlock(child);
+							if (component instanceof AssistantMessageComponent) {
+								component.setHideThinkingBlock(hidden);
 							}
 						}
 						this.chatContainer.clear();
@@ -4247,8 +4318,12 @@ export class InteractiveMode {
 						this.outputPad = padding;
 						if (this.streamingComponent || this.session.isStreaming) {
 							for (const child of this.chatContainer.children) {
-								if (child instanceof AssistantMessageComponent || child instanceof UserMessageComponent) {
-									child.setOutputPad(padding);
+								const component = this.unwrapCopyableBlock(child);
+								if (
+									component instanceof AssistantMessageComponent ||
+									component instanceof UserMessageComponent
+								) {
+									component.setOutputPad(padding);
 								}
 							}
 							if (this.streamingComponent) {

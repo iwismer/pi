@@ -99,6 +99,8 @@ export {
 export {
 	type Component,
 	Container,
+	type CopyOptions,
+	type CopyRegion,
 	CURSOR_MARKER,
 	type Focusable,
 	isFocusable,
@@ -107,6 +109,8 @@ export {
 	type OverlayMargin,
 	type OverlayOptions,
 	type OverlayUnfocusOptions,
+	type SelectionPoint,
+	type SelectionRange,
 	type SizeValue,
 	TUI,
 } from "./tui.ts";

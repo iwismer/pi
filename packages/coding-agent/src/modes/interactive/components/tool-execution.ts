@@ -358,7 +358,7 @@ export class ToolExecutionComponent extends Container {
 		}
 	}
 
-	private getTextOutput(): string {
+	getTextOutput(): string {
 		return getRenderedTextOutput(this.result, this.showImages);
 	}
 

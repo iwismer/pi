@@ -216,6 +216,9 @@ interface LayoutLine {
 	text: string;
 	hasCursor: boolean;
 	cursorPos?: number;
+	sourceLine: number;
+	sourceStartCol: number;
+	sourceEndCol: number;
 }
 
 export interface EditorTheme {
@@ -265,6 +268,16 @@ export class Editor implements Component, Focusable {
 
 	// Store last render width for cursor navigation
 	private lastWidth: number = 80;
+	private lastRenderBounds = { rowStart: 1, colStart: 1, width: 80, height: 0 };
+	private lastPromptClickBounds: {
+		rowStart: number;
+		colStart: number;
+		width: number;
+		contentColStart: number;
+		contentWidth: number;
+		height: number;
+	} | null = null;
+	private lastVisibleLayoutLines: LayoutLine[] = [];
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
@@ -461,6 +474,10 @@ export class Editor implements Component, Focusable {
 		// No cached state to invalidate currently
 	}
 
+	setRenderBounds(bounds: { rowStart: number; colStart: number; width: number; height: number }): void {
+		this.lastRenderBounds = bounds;
+	}
+
 	render(width: number): string[] {
 		const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
 		const paddingX = Math.min(this.paddingX, maxPadding);
@@ -499,6 +516,15 @@ export class Editor implements Component, Focusable {
 
 		// Get visible lines slice
 		const visibleLines = layoutLines.slice(this.scrollOffset, this.scrollOffset + maxVisibleLines);
+		this.lastVisibleLayoutLines = visibleLines;
+		this.lastPromptClickBounds = {
+			rowStart: this.lastRenderBounds.rowStart + 1,
+			colStart: this.lastRenderBounds.colStart,
+			width,
+			contentColStart: this.lastRenderBounds.colStart + paddingX,
+			contentWidth,
+			height: visibleLines.length,
+		};
 
 		const result: string[] = [];
 		const leftPadding = " ".repeat(paddingX);
@@ -878,6 +904,45 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
+	handlePromptMouseClick(click: { row: number; col: number }): void {
+		const bounds = this.lastPromptClickBounds;
+		if (!bounds) return;
+		const logicalRow = click.row + (typeof this.tui.getViewportTop === "function" ? this.tui.getViewportTop() : 0);
+		if (logicalRow < bounds.rowStart || logicalRow >= bounds.rowStart + bounds.height) return;
+		if (click.col < bounds.colStart || click.col >= bounds.colStart + bounds.width) return;
+		const visibleLineIndex = logicalRow - bounds.rowStart;
+		const layoutLine = this.lastVisibleLayoutLines[visibleLineIndex];
+		if (!layoutLine) return;
+		const clampedCol = Math.max(
+			bounds.contentColStart,
+			Math.min(click.col, bounds.contentColStart + bounds.contentWidth),
+		);
+		const visualCol = Math.max(0, clampedCol - bounds.contentColStart);
+		const cursorCol = this.visualColumnToSourceColumn(layoutLine, visualCol);
+		const cursorChanged = this.state.cursorLine !== layoutLine.sourceLine || this.state.cursorCol !== cursorCol;
+		this.state.cursorLine = layoutLine.sourceLine;
+		this.setCursorCol(cursorCol);
+		this.preferredVisualCol = null;
+		this.snappedFromCursorCol = null;
+		this.exitHistoryBrowsing();
+		this.cancelAutocomplete();
+		if (cursorChanged) {
+			this.lastAction = null;
+		}
+	}
+
+	private visualColumnToSourceColumn(layoutLine: LayoutLine, visualCol: number): number {
+		const text = layoutLine.text;
+		let width = 0;
+		for (const segment of this.segment(text, "grapheme")) {
+			const nextWidth = width + visibleWidth(segment.segment);
+			if (visualCol <= width) return layoutLine.sourceStartCol + segment.index;
+			if (visualCol < nextWidth) return layoutLine.sourceStartCol + segment.index;
+			width = nextWidth;
+		}
+		return layoutLine.sourceEndCol;
+	}
+
 	private layoutText(contentWidth: number): LayoutLine[] {
 		const layoutLines: LayoutLine[] = [];
 
@@ -887,6 +952,9 @@ export class Editor implements Component, Focusable {
 				text: "",
 				hasCursor: true,
 				cursorPos: 0,
+				sourceLine: 0,
+				sourceStartCol: 0,
+				sourceEndCol: 0,
 			});
 			return layoutLines;
 		}
@@ -904,11 +972,17 @@ export class Editor implements Component, Focusable {
 						text: line,
 						hasCursor: true,
 						cursorPos: this.state.cursorCol,
+						sourceLine: i,
+						sourceStartCol: 0,
+						sourceEndCol: line.length,
 					});
 				} else {
 					layoutLines.push({
 						text: line,
 						hasCursor: false,
+						sourceLine: i,
+						sourceStartCol: 0,
+						sourceEndCol: line.length,
 					});
 				}
 			} else {
@@ -952,11 +1026,17 @@ export class Editor implements Component, Focusable {
 							text: chunk.text,
 							hasCursor: true,
 							cursorPos: adjustedCursorPos,
+							sourceLine: i,
+							sourceStartCol: chunk.startIndex,
+							sourceEndCol: chunk.endIndex,
 						});
 					} else {
 						layoutLines.push({
 							text: chunk.text,
 							hasCursor: false,
+							sourceLine: i,
+							sourceStartCol: chunk.startIndex,
+							sourceEndCol: chunk.endIndex,
 						});
 					}
 				}

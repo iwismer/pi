@@ -104,11 +104,14 @@ export class AssistantMessageComponent extends Container {
 			} else if (content.type === "thinking" && content.thinking.trim()) {
 				// Add spacing only when another visible assistant content block follows.
 				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
-				const hasVisibleContentAfter = message.content
-					.slice(i + 1)
-					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
+				const laterContent = message.content.slice(i + 1);
+				const hasVisibleContentAfter = laterContent.some(
+					(c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()),
+				);
+				const hasToolCallAfter = laterContent.some((c) => c.type === "toolCall");
+				const shouldHideThinkingBlock = this.hideThinkingBlock && (hasVisibleContentAfter || hasToolCallAfter);
 
-				if (this.hideThinkingBlock) {
+				if (shouldHideThinkingBlock) {
 					// Show static thinking label when hidden
 					this.contentContainer.addChild(
 						new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0),

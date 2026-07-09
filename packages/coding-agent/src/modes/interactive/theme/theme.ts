@@ -779,13 +779,17 @@ export async function detectTerminalThemeForAuto({
 	timeoutMs,
 	env,
 }: TerminalAutoThemeDetectionOptions): Promise<TerminalTheme> {
+	const backgroundDetection = await detectTerminalBackgroundTheme({ ui, timeoutMs, env });
+	if (backgroundDetection.source === "terminal background" && backgroundDetection.confidence === "high") {
+		return backgroundDetection.theme;
+	}
 	try {
 		const colorScheme = await ui.queryTerminalColorScheme?.({ timeoutMs });
 		if (colorScheme) return colorScheme;
 	} catch {
 		// Fall back to OSC 11 / COLORFGBG detection when color-scheme DSR is unsupported.
 	}
-	return (await detectTerminalBackgroundTheme({ ui, timeoutMs, env })).theme;
+	return backgroundDetection.theme;
 }
 
 export function getDefaultTheme(): string {

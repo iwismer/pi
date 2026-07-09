@@ -67,6 +67,7 @@ import {
 	type MessageStartEvent,
 	type MessageUpdateEvent,
 	type ReplacedSessionContext,
+	type RunWhenIdleCallback,
 	type SessionBeforeCompactResult,
 	type SessionBeforeTreeResult,
 	type SessionStartEvent,
@@ -286,6 +287,8 @@ export class AgentSession {
 	private _followUpMessages: string[] = [];
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
+	private _idleCallbacks: RunWhenIdleCallback[] = [];
+	private _drainingIdleCallbacks = false;
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -676,7 +679,11 @@ export class AgentSession {
 			this._turnIndex = 0;
 			await this._extensionRunner.emit({ type: "agent_start" });
 		} else if (event.type === "agent_end") {
-			await this._extensionRunner.emit({ type: "agent_end", messages: event.messages });
+			await this._extensionRunner.emit({
+				type: "agent_end",
+				messages: event.messages,
+				willRetry: this._willRetryAfterAgentEnd(event),
+			});
 		} else if (event.type === "turn_start") {
 			const extensionEvent: TurnStartEvent = {
 				type: "turn_start",
@@ -1027,10 +1034,52 @@ export class AgentSession {
 			while (await this._handlePostAgentRun()) {
 				await this.agent.continue();
 			}
+			this._isAgentRunActive = false;
+			await this._drainIdleCallbacks();
 		} finally {
 			this._systemPromptOverride = undefined;
 			this._flushPendingBashMessages();
 			await this._emitAgentSettled();
+		}
+	}
+
+	private _scheduleIdleCallback(callback: RunWhenIdleCallback): void {
+		if (typeof callback !== "function") {
+			throw new Error("runWhenIdle requires a callback function");
+		}
+		this._idleCallbacks.push(callback);
+		if (!this._isAgentRunActive) {
+			void this._drainIdleCallbacks();
+		}
+	}
+
+	private async _drainIdleCallbacks(): Promise<void> {
+		if (this._drainingIdleCallbacks) return;
+		this._drainingIdleCallbacks = true;
+		try {
+			while (this._idleCallbacks.length > 0) {
+				if (this._extensionRunner.isStale) {
+					this._idleCallbacks = [];
+					return;
+				}
+				const callback = this._idleCallbacks.shift();
+				if (!callback) continue;
+				const ctx = this._extensionRunner.createCommandContext();
+				try {
+					await callback(ctx);
+					if (this._isAgentRunActive) {
+						await this._getIdleWaitPromise();
+					}
+				} catch (err) {
+					this._extensionRunner.emitError({
+						extensionPath: "<runWhenIdle>",
+						event: "run_when_idle",
+						error: err instanceof Error ? err.message : String(err),
+					});
+				}
+			}
+		} finally {
+			this._drainingIdleCallbacks = false;
 		}
 	}
 
@@ -2321,6 +2370,9 @@ export class AgentSession {
 						});
 					});
 				},
+				runWhenIdle: (callback) => {
+					this._scheduleIdleCallback(callback);
+				},
 				appendEntry: (customType, data) => {
 					const entryId = this.sessionManager.appendCustomEntry(customType, data);
 					const entry = this.sessionManager.getEntry(entryId);
@@ -2619,9 +2671,15 @@ export class AgentSession {
 		try {
 			await sleep(delayMs, this._retryAbortController.signal);
 		} catch {
-			// Aborted during sleep - emit end event so UI can clean up
+			// Aborted during sleep - emit end event so UI and extensions can clean up
 			const attempt = this._retryAttempt;
 			this._retryAttempt = 0;
+			await this._extensionRunner.emit({
+				type: "auto_retry_end",
+				success: false,
+				attempt,
+				finalError: "Retry cancelled",
+			});
 			this._emit({
 				type: "auto_retry_end",
 				success: false,
