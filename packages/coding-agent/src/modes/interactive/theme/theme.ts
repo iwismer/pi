@@ -820,6 +820,10 @@ export async function detectTerminalThemeForAuto({
 		// Fall back to OSC 11 / COLORFGBG detection when starting the color-scheme query fails.
 	}
 	const backgroundThemePromise = detectTerminalBackgroundTheme({ ui, timeoutMs, env });
+	const backgroundDetection = await backgroundThemePromise;
+	if (backgroundDetection.source === "terminal background" && backgroundDetection.confidence === "high") {
+		return backgroundDetection.theme;
+	}
 
 	try {
 		const colorScheme = await colorSchemePromise;
@@ -827,7 +831,7 @@ export async function detectTerminalThemeForAuto({
 	} catch {
 		// Fall back to the concurrently queried OSC 11 / COLORFGBG detection.
 	}
-	return (await backgroundThemePromise).theme;
+	return backgroundDetection.theme;
 }
 
 export function getDefaultTheme(): string {
