@@ -2042,6 +2042,46 @@ export class TUI extends Container {
 			this.forceViewportFullRedraw = false;
 		};
 
+		// Repaint only the visible bottom slice when returning from app-viewport mode.
+		// Rewriting the whole buffer here replays the entire transcript into the
+		// terminal on every return-to-bottom wheel tick, which flashes the screen and
+		// floods native scrollback. Bookkeeping still tracks the full buffer so the
+		// normal differential renderer resumes seamlessly; lines that streamed in
+		// while scrolled up simply never reach native scrollback (they stay reachable
+		// through the app viewport). Falls back to a full replay when the visible
+		// slice contains Kitty image lines, which the slice path cannot draw.
+		const bottomSliceRender = (): void => {
+			const sliceTop = Math.max(0, newLines.length - height);
+			for (let i = sliceTop; i < newLines.length; i++) {
+				if (isImageLine(newLines[i])) {
+					fullRender(true, true);
+					return;
+				}
+			}
+			this.fullRedrawCount += 1;
+			let buffer = "\x1b[?2026h";
+			buffer += this.deleteKittyImages(this.previousKittyImageIds);
+			buffer += "\x1b[2J\x1b[H";
+			for (let i = sliceTop; i < newLines.length; i++) {
+				if (i > sliceTop) buffer += "\r\n";
+				buffer += newLines[i];
+			}
+			buffer += "\x1b[?2026l";
+			this.terminal.write(buffer);
+			this.cursorRow = Math.max(0, newLines.length - 1);
+			this.hardwareCursorRow = this.cursorRow;
+			this.maxLinesRendered = newLines.length;
+			const bufferLength = Math.max(height, newLines.length);
+			this.previousViewportTop = Math.max(0, bufferLength - height);
+			this.positionHardwareCursor(cursorPos, newLines.length);
+			this.previousLines = newLines;
+			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+			this.previousWidth = width;
+			this.previousHeight = height;
+			this.lastRenderUsedAppViewport = false;
+			this.forceViewportFullRedraw = false;
+		};
+
 		const debugRedraw = process.env.PI_DEBUG_REDRAW === "1";
 		const logRedraw = (reason: string): void => {
 			if (!debugRedraw) return;
@@ -2055,7 +2095,8 @@ export class TUI extends Container {
 			return;
 		}
 		if (this.forceViewportFullRedraw || this.lastRenderUsedAppViewport) {
-			fullRender(true, true);
+			logRedraw("return to follow-bottom (slice repaint)");
+			bottomSliceRender();
 			return;
 		}
 		// First render - just output everything without clearing unless mouse mode needs a known screen origin.
