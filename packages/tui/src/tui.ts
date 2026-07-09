@@ -326,6 +326,12 @@ function renderedChangeAffectsSelection(
 	return false;
 }
 
+function selectionIntersectsRows(selection: InternalSelectionState | null, firstRow: number, lastRow: number): boolean {
+	if (!selection) return false;
+	const range = normalizeSelectionRange(selection);
+	return firstRow <= range.end.bufferRow && lastRow >= range.start.bufferRow;
+}
+
 function stripAnsiCodes(text: string): string {
 	let result = "";
 	let i = 0;
@@ -2234,10 +2240,22 @@ export class TUI extends Container {
 		}
 
 		// Differential rendering can only touch what was actually visible.
-		// If the first changed line is above the previous viewport, we need a full redraw.
+		// If the first changed line is above the previous viewport, the differential
+		// renderer cannot patch it with relative cursor moves (the change is
+		// off-screen above the visible region). Previously this fell back to a full
+		// screen clear + replay of the ENTIRE buffer, which flashed the screen and
+		// replayed thousands of lines on long sessions whenever a mid-conversation
+		// change (e.g. a tool-execution component growing, a thinking block
+		// collapsing, or markdown block-boundary reflow) landed above the viewport.
+		// In follow-bottom mode the visible content is the bottom slice, so repaint
+		// only that slice (reusing bottomSliceRender) instead of the whole buffer.
 		if (firstChanged < prevViewportTop) {
 			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
-			fullRender(true);
+			if (selectionIntersectsRows(this.selectionState, firstChanged, lastChanged)) {
+				fullRender(true);
+			} else {
+				bottomSliceRender();
+			}
 			return;
 		}
 

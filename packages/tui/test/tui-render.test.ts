@@ -76,6 +76,12 @@ type TuiInternals = {
 	handleInput(data: string): void;
 	getSelection(): unknown;
 	previousLines: string[];
+	selectionState: {
+		anchor: { bufferRow: number; col: number };
+		extent: { bufferRow: number; col: number };
+		dragging: boolean;
+		moved: boolean;
+	} | null;
 };
 
 function sgrMouse(buttonCode: number, col: number, row: number, suffix: "M" | "m"): string {
@@ -122,6 +128,29 @@ describe("TUI mouse selection", () => {
 			`${selectionAnsi("selectabl")}e response text`,
 			"selection highlight remains visible while lower status/spinner lines change",
 		);
+	});
+
+	it("replays the full buffer when an off-viewport selection needs painting", () => {
+		const terminal = new LoggingVirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const tuiInternals = tui as unknown as TuiInternals;
+		const component = new TestComponent();
+		component.lines = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`);
+		tui.addChild(component);
+
+		tuiInternals.doRender();
+		terminal.clearWrites();
+		tuiInternals.selectionState = {
+			anchor: { bufferRow: 2, col: 0 },
+			extent: { bufferRow: 2, col: 6 },
+			dragging: false,
+			moved: true,
+		};
+		tuiInternals.doRender();
+
+		const output = terminal.getWrites();
+		assert.match(output, /\x1b\[7mline 3\x1b\[0m/, "off-viewport selection highlight is written to the terminal");
+		assert.match(output, /line 30/, "full-buffer replay preserves the rest of the transcript after the selected row");
 	});
 });
 
