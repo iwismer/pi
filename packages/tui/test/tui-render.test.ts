@@ -152,6 +152,56 @@ describe("TUI mouse selection", () => {
 		assert.match(output, /\x1b\[7mline 3\x1b\[0m/, "off-viewport selection highlight is written to the terminal");
 		assert.match(output, /line 30/, "full-buffer replay preserves the rest of the transcript after the selected row");
 	});
+
+	it("paints visible selection when hidden content above the viewport also changes", () => {
+		const terminal = new LoggingVirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const tuiInternals = tui as unknown as TuiInternals;
+		const component = new TestComponent();
+		component.lines = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`);
+		tui.addChild(component);
+
+		tuiInternals.doRender();
+		terminal.clearWrites();
+		component.lines[2] = "hidden churn";
+		tuiInternals.selectionState = {
+			anchor: { bufferRow: 28, col: 0 },
+			extent: { bufferRow: 28, col: 6 },
+			dragging: true,
+			moved: true,
+		};
+		tuiInternals.doRender();
+
+		const output = terminal.getWrites();
+		assert.match(output, /\x1b\[7mline 2\x1b\[0m9/, "visible selection highlight is written despite hidden churn");
+		assert.doesNotMatch(output, /\x1b\[2J/, "visible drag updates should not clear and replay the screen");
+	});
+
+	it("does not repaint for same-length hidden churn while preserving selection state", () => {
+		const terminal = new LoggingVirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const tuiInternals = tui as unknown as TuiInternals;
+		const component = new TestComponent();
+		component.lines = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`);
+		tui.addChild(component);
+
+		tuiInternals.doRender();
+		terminal.clearWrites();
+		component.lines[2] = "hidden churn";
+		tuiInternals.selectionState = {
+			anchor: { bufferRow: 28, col: 0 },
+			extent: { bufferRow: 28, col: 6 },
+			dragging: true,
+			moved: true,
+		};
+		tuiInternals.previousLines = tuiInternals.previousLines.map((line, index) =>
+			index === 28 ? `${selectionAnsi("line 2")}9\x1b[0m\x1b]8;;\x07` : line,
+		);
+		tuiInternals.doRender();
+
+		assert.equal(terminal.getWrites(), "", "hidden same-length churn should not write to the terminal");
+		assert.ok(tuiInternals.getSelection(), "selection should be preserved across hidden churn");
+	});
 });
 
 describe("TUI Kitty image cleanup", () => {

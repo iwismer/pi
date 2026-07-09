@@ -148,7 +148,7 @@ export class ProcessTerminal implements Terminal {
 		process.stdout.write("\x1b[?2004h");
 		this.promptMouseModeEnabled = process.env.PI_PROMPT_MOUSE === "1";
 		if (this.promptMouseModeEnabled) {
-			process.stdout.write("\x1b[?1002h\x1b[?1006h");
+			process.stdout.write("\x1b[?1000h\x1b[?1002h\x1b[?1006h");
 		}
 
 		// Set up resize handler immediately
@@ -413,7 +413,7 @@ export class ProcessTerminal implements Terminal {
 			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
 		if (this.promptMouseModeEnabled) {
-			process.stdout.write("\x1b[?1002l\x1b[?1006l");
+			process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1006l");
 			this.promptMouseModeEnabled = false;
 		}
 

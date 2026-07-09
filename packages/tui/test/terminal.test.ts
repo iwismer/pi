@@ -22,6 +22,41 @@ describe("normalizeAppleTerminalInput", () => {
 	});
 });
 
+describe("ProcessTerminal prompt mouse mode", () => {
+	it("enables normal tracking with button tracking for terminal multiplexer compatibility", () => {
+		const previousPromptMouse = process.env.PI_PROMPT_MOUSE;
+		const previousWrite = process.stdout.write;
+		const writes: string[] = [];
+		process.env.PI_PROMPT_MOUSE = "1";
+		process.stdout.write = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stdout.write;
+
+		const terminal = new ProcessTerminal();
+		let stopped = false;
+		try {
+			terminal.start(
+				() => {},
+				() => {},
+			);
+			assert.ok(writes.includes("\x1b[?1000h\x1b[?1002h\x1b[?1006h"));
+
+			terminal.stop();
+			stopped = true;
+			assert.ok(writes.includes("\x1b[?1000l\x1b[?1002l\x1b[?1006l"));
+		} finally {
+			if (!stopped) terminal.stop();
+			process.stdout.write = previousWrite;
+			if (previousPromptMouse === undefined) {
+				Reflect.deleteProperty(process.env, "PI_PROMPT_MOUSE");
+			} else {
+				process.env.PI_PROMPT_MOUSE = previousPromptMouse;
+			}
+		}
+	});
+});
+
 describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 	type NegotiationHarness = {
 		terminal: ProcessTerminal;

@@ -318,9 +318,25 @@ function renderedChangeAffectsSelection(
 	nextLines: string[],
 ): boolean {
 	const range = normalizeSelectionRange(selection);
+	const firstSelectionRow = Math.max(range.start.bufferRow, 0);
 	const lastSelectionRow = Math.max(range.start.bufferRow, range.end.bufferRow);
-	const lastRenderedRow = Math.min(lastSelectionRow, Math.max(previousLines.length, nextLines.length) - 1);
-	for (let row = 0; row <= lastRenderedRow; row++) {
+	const maxLines = Math.max(previousLines.length, nextLines.length);
+	let firstChanged = -1;
+	for (let row = 0; row < maxLines; row++) {
+		const previousLine = row < previousLines.length ? previousLines[row] : "";
+		const nextLine = row < nextLines.length ? nextLines[row] : "";
+		if (previousLine !== nextLine) {
+			firstChanged = row;
+			break;
+		}
+	}
+	if (firstChanged === -1 || firstChanged > lastSelectionRow) return false;
+
+	if (previousLines.length !== nextLines.length) {
+		return firstChanged <= lastSelectionRow;
+	}
+
+	for (let row = firstSelectionRow; row <= lastSelectionRow; row++) {
 		if (previousLines[row] !== nextLines[row]) return true;
 	}
 	return false;
@@ -2240,23 +2256,43 @@ export class TUI extends Container {
 		}
 
 		// Differential rendering can only touch what was actually visible.
-		// If the first changed line is above the previous viewport, the differential
-		// renderer cannot patch it with relative cursor moves (the change is
-		// off-screen above the visible region). Previously this fell back to a full
-		// screen clear + replay of the ENTIRE buffer, which flashed the screen and
-		// replayed thousands of lines on long sessions whenever a mid-conversation
-		// change (e.g. a tool-execution component growing, a thinking block
-		// collapsing, or markdown block-boundary reflow) landed above the viewport.
-		// In follow-bottom mode the visible content is the bottom slice, so repaint
-		// only that slice (reusing bottomSliceRender) instead of the whole buffer.
+		// If the first changed line is above the previous viewport, same-length
+		// off-screen churn does not need to repaint the terminal at all. If there
+		// are also visible changes (for example active mouse-selection highlight),
+		// patch only the first visible changed row instead of clearing and replaying
+		// the screen on every drag motion.
 		if (firstChanged < prevViewportTop) {
 			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
-			if (selectionIntersectsRows(this.selectionState, firstChanged, lastChanged)) {
+			const selection = this.selectionState ? normalizeSelectionRange(this.selectionState) : null;
+			const selectionIsAboveViewport = selection ? selection.end.bufferRow < prevViewportTop : false;
+			if (selectionIsAboveViewport && selectionIntersectsRows(this.selectionState, firstChanged, lastChanged)) {
 				fullRender(true);
+				return;
+			}
+			if (newLines.length === this.previousLines.length) {
+				let firstVisibleChanged = -1;
+				for (let i = prevViewportTop; i < maxLines; i++) {
+					const oldLine = i < this.previousLines.length ? this.previousLines[i] : "";
+					const newLine = i < newLines.length ? newLines[i] : "";
+					if (oldLine !== newLine) {
+						firstVisibleChanged = i;
+						break;
+					}
+				}
+				if (firstVisibleChanged === -1) {
+					this.positionHardwareCursor(cursorPos, newLines.length);
+					this.previousLines = newLines;
+					this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+					this.previousWidth = width;
+					this.previousHeight = height;
+					this.previousViewportTop = prevViewportTop;
+					return;
+				}
+				firstChanged = firstVisibleChanged;
 			} else {
 				bottomSliceRender();
+				return;
 			}
-			return;
 		}
 
 		// Render from first changed line to end
