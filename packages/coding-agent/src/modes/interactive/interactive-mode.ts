@@ -161,6 +161,8 @@ import {
 } from "./theme/theme.ts";
 import { InteractiveThemeController } from "./theme/theme-controller.ts";
 
+const SELECTION_COPY_STATUS_MS = 2000;
+
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
 	setExpanded(expanded: boolean): void;
@@ -378,6 +380,9 @@ export class InteractiveMode {
 	// Status line tracking (for mutating immediately-sequential status updates)
 	private lastStatusSpacer: Spacer | undefined = undefined;
 	private lastStatusText: Text | undefined = undefined;
+	private transientStatusTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+	private transientStatusSpacer: Spacer | undefined = undefined;
+	private transientStatusText: Text | undefined = undefined;
 
 	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
@@ -482,7 +487,7 @@ export class InteractiveMode {
 			try {
 				await copyToClipboard(text);
 				if (!options?.quiet) {
-					this.showStatus("Copied selection");
+					this.showTransientStatus("Copied selection", SELECTION_COPY_STATUS_MS);
 				}
 			} catch (error) {
 				this.showError(`Failed to copy selection: ${error instanceof Error ? error.message : String(error)}`);
@@ -3190,7 +3195,47 @@ export class InteractiveMode {
 	 * If multiple status messages are emitted back-to-back (without anything else being added to the chat),
 	 * we update the previous status line instead of appending new ones to avoid log spam.
 	 */
+	private clearTransientStatusTimer(): void {
+		if (!this.transientStatusTimer) return;
+		clearTimeout(this.transientStatusTimer);
+		this.transientStatusTimer = undefined;
+	}
+
+	private forgetTransientStatus(): void {
+		this.clearTransientStatusTimer();
+		this.transientStatusSpacer = undefined;
+		this.transientStatusText = undefined;
+	}
+
+	private removeTransientStatus(): void {
+		const spacer = this.transientStatusSpacer;
+		const text = this.transientStatusText;
+		this.transientStatusTimer = undefined;
+		if (!spacer || !text) return;
+
+		const children = this.chatContainer.children;
+		const spacerIndex = children.indexOf(spacer);
+		const textIndex = children.indexOf(text);
+		this.transientStatusSpacer = undefined;
+		this.transientStatusText = undefined;
+		if (spacerIndex === -1 || textIndex !== spacerIndex + 1) return;
+		children.splice(spacerIndex, 2);
+		if (this.lastStatusSpacer === spacer) this.lastStatusSpacer = undefined;
+		if (this.lastStatusText === text) this.lastStatusText = undefined;
+		this.ui.requestRender();
+	}
+
+	private showTransientStatus(message: string, durationMs: number): void {
+		this.showStatus(message);
+		this.transientStatusSpacer = this.lastStatusSpacer;
+		this.transientStatusText = this.lastStatusText;
+		this.clearTransientStatusTimer();
+		this.transientStatusTimer = setTimeout(() => this.removeTransientStatus(), durationMs);
+		this.transientStatusTimer.unref?.();
+	}
+
 	private showStatus(message: string): void {
+		this.forgetTransientStatus();
 		const children = this.chatContainer.children;
 		const last = children.length > 0 ? children[children.length - 1] : undefined;
 		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;

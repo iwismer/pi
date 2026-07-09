@@ -65,6 +65,24 @@ function normalizeRenderedOutput(container: Container, width = 220): string {
 		.trim();
 }
 
+function makeStatusFixture(): any {
+	const prototype = (InteractiveMode as any).prototype;
+	return {
+		chatContainer: new Container(),
+		ui: { requestRender: vi.fn() },
+		lastStatusSpacer: undefined,
+		lastStatusText: undefined,
+		transientStatusTimer: undefined,
+		transientStatusSpacer: undefined,
+		transientStatusText: undefined,
+		clearTransientStatusTimer: prototype.clearTransientStatusTimer,
+		forgetTransientStatus: prototype.forgetTransientStatus,
+		removeTransientStatus: prototype.removeTransientStatus,
+		showStatus: prototype.showStatus,
+		showTransientStatus: prototype.showTransientStatus,
+	};
+}
+
 type ExtensionFixture = {
 	path: string;
 	sourceInfo?: SourceInfo;
@@ -77,12 +95,7 @@ describe("InteractiveMode.showStatus", () => {
 	});
 
 	test("coalesces immediately-sequential status messages", () => {
-		const fakeThis: any = {
-			chatContainer: new Container(),
-			ui: { requestRender: vi.fn() },
-			lastStatusSpacer: undefined,
-			lastStatusText: undefined,
-		};
+		const fakeThis = makeStatusFixture();
 
 		(InteractiveMode as any).prototype.showStatus.call(fakeThis, "STATUS_ONE");
 		expect(fakeThis.chatContainer.children).toHaveLength(2);
@@ -96,12 +109,7 @@ describe("InteractiveMode.showStatus", () => {
 	});
 
 	test("appends a new status line if something else was added in between", () => {
-		const fakeThis: any = {
-			chatContainer: new Container(),
-			ui: { requestRender: vi.fn() },
-			lastStatusSpacer: undefined,
-			lastStatusText: undefined,
-		};
+		const fakeThis = makeStatusFixture();
 
 		(InteractiveMode as any).prototype.showStatus.call(fakeThis, "STATUS_ONE");
 		expect(fakeThis.chatContainer.children).toHaveLength(2);
@@ -114,6 +122,43 @@ describe("InteractiveMode.showStatus", () => {
 		// adds spacer + text
 		expect(fakeThis.chatContainer.children).toHaveLength(5);
 		expect(renderLastLine(fakeThis.chatContainer)).toContain("STATUS_TWO");
+	});
+
+	test("removes transient status after its timeout", () => {
+		vi.useFakeTimers();
+		try {
+			const fakeThis = makeStatusFixture();
+
+			(InteractiveMode as any).prototype.showTransientStatus.call(fakeThis, "Copied selection", 2000);
+			expect(fakeThis.chatContainer.children).toHaveLength(2);
+			expect(renderLastLine(fakeThis.chatContainer)).toContain("Copied selection");
+
+			vi.advanceTimersByTime(1999);
+			expect(fakeThis.chatContainer.children).toHaveLength(2);
+
+			vi.advanceTimersByTime(1);
+			expect(fakeThis.chatContainer.children).toHaveLength(0);
+			expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("does not remove a later status when transient timer would have expired", () => {
+		vi.useFakeTimers();
+		try {
+			const fakeThis = makeStatusFixture();
+
+			(InteractiveMode as any).prototype.showTransientStatus.call(fakeThis, "Copied selection", 2000);
+			(InteractiveMode as any).prototype.showStatus.call(fakeThis, "STATUS_TWO");
+			vi.advanceTimersByTime(2000);
+
+			expect(fakeThis.chatContainer.children).toHaveLength(2);
+			expect(renderLastLine(fakeThis.chatContainer)).toContain("STATUS_TWO");
+			expect(renderLastLine(fakeThis.chatContainer)).not.toContain("Copied selection");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 
@@ -129,6 +174,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 			loadedResourcesContainer: { children: [loadedResourcesChild] },
 			chatContainer: { children: [chatChild] },
 			ui: { requestRender: vi.fn() },
+			unwrapCopyableBlock: (component: Component) => component,
 		};
 
 		(InteractiveMode as any).prototype.setToolsExpanded.call(fakeThis, true);
