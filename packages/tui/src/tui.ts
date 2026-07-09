@@ -312,6 +312,20 @@ function renderedLinesEqual(a: string[], b: string[]): boolean {
 	return true;
 }
 
+function renderedChangeAffectsSelection(
+	selection: InternalSelectionState,
+	previousLines: string[],
+	nextLines: string[],
+): boolean {
+	const range = normalizeSelectionRange(selection);
+	const lastSelectionRow = Math.max(range.start.bufferRow, range.end.bufferRow);
+	const lastRenderedRow = Math.min(lastSelectionRow, Math.max(previousLines.length, nextLines.length) - 1);
+	for (let row = 0; row <= lastRenderedRow; row++) {
+		if (previousLines[row] !== nextLines[row]) return true;
+	}
+	return false;
+}
+
 function stripAnsiCodes(text: string): string {
 	let result = "";
 	let i = 0;
@@ -1942,7 +1956,7 @@ export class TUI extends Container {
 		if (this.selectionState) {
 			const renderedContentChanged =
 				this.lastPlainRenderedLines.length > 0 &&
-				!renderedLinesEqual(this.lastPlainRenderedLines, plainRenderedLines);
+				renderedChangeAffectsSelection(this.selectionState, this.lastPlainRenderedLines, plainRenderedLines);
 			if (widthChanged || heightChanged || renderedContentChanged) {
 				this.clearSelection(false);
 			}

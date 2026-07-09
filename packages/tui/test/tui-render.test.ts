@@ -71,6 +71,60 @@ function getCellItalic(terminal: VirtualTerminal, row: number, col: number): num
 	return cell.isItalic();
 }
 
+type TuiInternals = {
+	doRender(): void;
+	handleInput(data: string): void;
+	getSelection(): unknown;
+	previousLines: string[];
+};
+
+function sgrMouse(buttonCode: number, col: number, row: number, suffix: "M" | "m"): string {
+	return `\x1b[<${buttonCode};${col};${row}${suffix}`;
+}
+
+function selectionAnsi(text: string): string {
+	return `\x1b[0m\x1b[7m${text}\x1b[0m`;
+}
+
+function withoutLineReset(line: string): string {
+	return line.replace(/\x1b\[0m\x1b\]8;;\x07$/, "");
+}
+
+describe("TUI mouse selection", () => {
+	it("preserves selection when rendered content changes only after the selected range", () => {
+		const terminal = new LoggingVirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const tuiInternals = tui as unknown as TuiInternals;
+		let tick = 0;
+		const component = new TestComponent();
+		component.render = () => ["selectable response text", "static line", `working ${tick}`];
+		tui.addChild(component);
+
+		tuiInternals.doRender();
+		tuiInternals.handleInput(sgrMouse(0, 1, 1, "M"));
+		tuiInternals.handleInput(sgrMouse(32, 10, 1, "M"));
+		tick += 1;
+		tuiInternals.handleInput(sgrMouse(0, 10, 1, "m"));
+		tuiInternals.doRender();
+
+		assert.deepEqual(
+			tuiInternals.getSelection(),
+			{
+				start: { bufferRow: 0, col: 0 },
+				end: { bufferRow: 0, col: 9 },
+				dragging: false,
+				moved: true,
+			},
+			"selection should survive unrelated render churn below the selected range",
+		);
+		assert.equal(
+			withoutLineReset(tuiInternals.previousLines[0] ?? ""),
+			`${selectionAnsi("selectabl")}e response text`,
+			"selection highlight remains visible while lower status/spinner lines change",
+		);
+	});
+});
+
 describe("TUI Kitty image cleanup", () => {
 	it("clears reserved Kitty image rows before drawing appended image placements", async () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
