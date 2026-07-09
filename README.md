@@ -16,7 +16,7 @@ This is the home of the Pi agent harness project including our self extensible c
 
 ## Isaac's fork changes
 
-This fork carries Isaac's source-level Pi runtime customizations. The local `personal-iwismer-pi/runtime` package consumes this checkout directly instead of carrying pnpm patches for upstream Pi packages.
+This fork carries Isaac's source-level Pi runtime customizations for local runtime consumption instead of carrying pnpm patches for upstream Pi packages.
 
 Current fork-only changes:
 
@@ -26,7 +26,7 @@ Current fork-only changes:
 - Interactive mode supports app-owned mouse selection copying and copyable `[copy]` regions for messages and tool output.
 - `pi-tui` supports prompt mouse clicks, app-owned wheel scrolling, a visible scrollback viewport with scrollbar, active-viewport cursor handling, and stable viewport anchoring across bottom-of-buffer shrink/growth.
 
-When changing Pi core, TUI, renderer, or extension APIs for Isaac's local runtime, make the source change in this fork, build the affected package, then reinstall/verify `personal-iwismer-pi/runtime`.
+When changing Pi core, TUI, renderer, or extension APIs for Isaac's local runtime, make the source change in this fork, build the affected package, then reinstall and verify the local runtime.
 
 * **[@earendil-works/pi-coding-agent](packages/coding-agent)**: Interactive coding agent CLI
 * **[@earendil-works/pi-agent-core](packages/agent)**: Agent runtime with tool calling and state management
