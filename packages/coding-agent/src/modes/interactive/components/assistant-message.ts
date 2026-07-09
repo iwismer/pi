@@ -133,33 +133,46 @@ export class AssistantMessageComponent extends Container {
 					continue;
 				}
 
-				// Add spacing only when another visible assistant content block follows.
-				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
-				const hasVisibleContentAfter = message.content
-					.slice(i + 1)
-					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
+				// Keep the current thinking run visible until later assistant content or a tool call makes it non-current.
+				const laterContent = message.content.slice(i + 1);
+				const hasVisibleContentAfter = laterContent.some(
+					(c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()),
+				);
+				const hasToolCallAfter = laterContent.some((c) => c.type === "toolCall");
+				const shouldHideThinkingRun = this.hideThinkingBlock && (hasVisibleContentAfter || hasToolCallAfter);
+				const hasEarlierThinkingInCurrentRun = this.hideThinkingBlock && thinkingBlocks.length > 1;
 
 				const runIndex = thinkingRunIndex++;
-				const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
-				const thinkingComponent = hidden
-					? new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0)
-					: new Markdown(
-							thinkingBlocks.join("\n\n"),
-							this.outputPad,
-							0,
-							this.markdownTheme,
-							{
-								color: (text: string) => theme.fg("thinkingText", text),
-								italic: true,
-							},
-							{
-								transform: createMarkdownTransform(
-									"assistant-thinking",
-									this.isStreaming,
-									this.markdownTransformers,
-								),
-							},
-						);
+				const override = this.thinkingVisibilityOverrides.get(runIndex);
+				const hidden = override ?? (shouldHideThinkingRun || hasEarlierThinkingInCurrentRun);
+				const visibleThinking = this.hideThinkingBlock ? thinkingBlocks.at(-1)! : thinkingBlocks.join("\n\n");
+				const thinkingLabel = new Text(
+					theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)),
+					this.outputPad,
+					0,
+				);
+				const thinkingMarkdown = new Markdown(
+					visibleThinking,
+					this.outputPad,
+					0,
+					this.markdownTheme,
+					{
+						color: (text: string) => theme.fg("thinkingText", text),
+						italic: true,
+					},
+					{
+						transform: createMarkdownTransform("assistant-thinking", this.isStreaming, this.markdownTransformers),
+					},
+				);
+				let thinkingComponent: Container | Text | Markdown = hidden ? thinkingLabel : thinkingMarkdown;
+				if (hidden && !shouldHideThinkingRun && override === undefined) {
+					// Current run in hidden mode: coalesce earlier blocks under the label, keep the latest visible.
+					const combined = new Container();
+					combined.addChild(thinkingLabel);
+					combined.addChild(new Spacer(1));
+					combined.addChild(thinkingMarkdown);
+					thinkingComponent = combined;
+				}
 				this.contentContainer.addChild(
 					new MouseRegion(thinkingComponent, (event) => {
 						if (event.type !== "click" || event.button !== "left") return undefined;
