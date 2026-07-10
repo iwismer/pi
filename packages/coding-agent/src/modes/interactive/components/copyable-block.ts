@@ -8,12 +8,17 @@ const DIM_COPY_LABEL = "\x1b[2m[copy]\x1b[0m";
 const DIM_COPIED_LABEL = "\x1b[2m[copied]\x1b[0m";
 // Columns at the right edge that must be free of text for the label to sit on a line.
 // Sized for the widest label ([copied]) plus padding and a one-column gap, and kept
-// constant across the copy/copied states so toggling feedback does not move the label.
+// constant across the copy/copied states so toggling feedback never changes which line
+// the label sits on and [copied] always fits (the label stays right-aligned, so its left
+// edge shifts two columns between states).
 const COPY_REGION = COPIED_LABEL.length + COPY_RIGHT_PAD + 1;
-const MIN_CHILD_WIDTH = 20;
+// Minimum content width left of the label region for the label to be shown at all.
+const MIN_WIDTH_FOR_LABEL = 20;
 
 // Matches CSI, OSC, and APC escape sequences (same families extractAnsiCode supports).
-const ANSI_SEQUENCE_RE = /\x1b(?:\[[0-9;:?]*[ -/]*[@-~]|[\]_][^\x07\x1b]*(?:\x07|\x1b\\)?)/g;
+// Terminators are mandatory: an unterminated sequence must NOT match, so its bytes count
+// as text and regionHasText fails conservatively (label skipped, nothing painted over).
+const ANSI_SEQUENCE_RE = /\x1b(?:\[[0-9;:?]*[ -/]*[@-~]|[\]_][^\x07\x1b]*(?:\x07|\x1b\\))/g;
 
 /** True if the given column range of the line contains visible non-space characters. */
 function regionHasText(line: string, start: number, length: number): boolean {
@@ -95,13 +100,13 @@ export class CopyableBlockComponent extends Container {
 		const copied = Date.now() < this.copiedUntil;
 		const plainLabel = copied ? COPIED_LABEL : COPY_LABEL;
 		const styledLabel = copied ? DIM_COPIED_LABEL : DIM_COPY_LABEL;
-		if (!mouseCopyEnabled() || !text || width - COPY_REGION < MIN_CHILD_WIDTH || lines.length === 0) {
+		if (!mouseCopyEnabled() || !text || width - COPY_REGION < MIN_WIDTH_FOR_LABEL || lines.length === 0) {
 			return lines;
 		}
 		// Overlay the label on the first visible line (for boxed content this is the top
 		// padding row, so the label sits on the box background). If that line has text under
-		// the label region, walk up to the nearest earlier blank line; if none is free, skip
-		// the label rather than paint over content.
+		// the label region, walk up to the nearest earlier line whose label region is free;
+		// if none is, skip the label rather than paint over content.
 		const regionStart = width - COPY_REGION;
 		const firstVisible = Math.max(
 			0,
