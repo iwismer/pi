@@ -28,7 +28,13 @@ import {
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 const MULTI_CLICK_INTERVAL_MS = 500;
-const MOUSE_WHEEL_SCROLL_LINES = 3;
+const DEFAULT_MOUSE_WHEEL_SCROLL_LINES = 3;
+
+function resolveMouseWheelScrollLines(): number {
+	const raw = Number.parseInt(process.env.PI_WHEEL_SCROLL_LINES ?? "", 10);
+	if (Number.isInteger(raw) && raw >= 1 && raw <= 100) return raw;
+	return DEFAULT_MOUSE_WHEEL_SCROLL_LINES;
+}
 const APP_VIEWPORT_SCROLLBAR_TRACK = "│";
 const APP_VIEWPORT_SCROLLBAR_THUMB = "█";
 
@@ -662,6 +668,20 @@ export class TUI extends Container {
 	private lastRenderedLineCount = 0;
 	private lastRenderUsedAppViewport = false;
 	private forceViewportFullRedraw = false;
+	/** False when no content-affecting render request arrived since the last full render pipeline run. */
+	private contentDirty = true;
+	/**
+	 * Final processed full-buffer lines from the last full render pipeline run
+	 * (post selection/reset processing, cursor markers stripped). Wheel-scroll
+	 * ticks re-slice this instead of re-rendering every component.
+	 */
+	private scrollRenderCache: {
+		lines: string[];
+		cursorPos: { row: number; col: number } | null;
+		width: number;
+		height: number;
+	} | null = null;
+	private mouseWheelScrollLines = resolveMouseWheelScrollLines();
 	private fullRedrawCount = 0;
 	private stopped = false;
 	private pendingOsc11BackgroundReplies = 0;
@@ -1118,6 +1138,8 @@ export class TUI extends Container {
 	override invalidate(): void {
 		super.invalidate();
 		for (const overlay of this.overlayStack) overlay.component.invalidate?.();
+		this.contentDirty = true;
+		this.scrollRenderCache = null;
 	}
 
 	start(): void {
@@ -1198,6 +1220,7 @@ export class TUI extends Container {
 	}
 
 	requestRender(force = false): void {
+		this.contentDirty = true;
 		if (force) {
 			this.previousLines = [];
 			this.previousWidth = -1; // -1 triggers widthChanged, forcing a full clear
@@ -1221,6 +1244,17 @@ export class TUI extends Container {
 			});
 			return;
 		}
+		if (this.renderRequested) return;
+		this.renderRequested = true;
+		process.nextTick(() => this.scheduleRender());
+	}
+
+	/**
+	 * Request a repaint for a viewport scroll without marking content dirty,
+	 * so doRender can re-slice the cached line buffer instead of re-rendering
+	 * every component.
+	 */
+	private requestScrollRender(): void {
 		if (this.renderRequested) return;
 		this.renderRequested = true;
 		process.nextTick(() => this.scheduleRender());
@@ -1403,7 +1437,7 @@ export class TUI extends Container {
 		this.lastMouseClick = null;
 		this.selectionState = null;
 		this.forceViewportFullRedraw = true;
-		this.requestRender();
+		this.requestScrollRender();
 		return true;
 	}
 
@@ -1411,7 +1445,7 @@ export class TUI extends Container {
 		const event = parseSgrMouseEvent(data);
 		if (!event) return false;
 		if (event.buttonCode === 64 || event.buttonCode === 65) {
-			const delta = event.buttonCode === 64 ? -MOUSE_WHEEL_SCROLL_LINES : MOUSE_WHEEL_SCROLL_LINES;
+			const delta = event.buttonCode === 64 ? -this.mouseWheelScrollLines : this.mouseWheelScrollLines;
 			this.scrollViewportBy(delta);
 			return true;
 		}
@@ -1939,10 +1973,169 @@ export class TUI extends Container {
 		return null;
 	}
 
+	/**
+	 * Strip any remaining cursor markers anywhere in the buffer (markers inside
+	 * the active extraction window are already removed by extractCursorPosition).
+	 * Returns the bottom-most stripped marker position, if any. Required before
+	 * caching lines for the scroll fast path so a stale marker can't scroll into
+	 * view from the cached buffer.
+	 */
+	private stripCursorMarkers(lines: string[]): { row: number; col: number } | null {
+		let found: { row: number; col: number } | null = null;
+		for (let row = lines.length - 1; row >= 0; row--) {
+			let line = lines[row];
+			let markerIndex = line.indexOf(CURSOR_MARKER);
+			if (markerIndex === -1) continue;
+			const col = visibleWidth(line.slice(0, markerIndex));
+			while (markerIndex !== -1) {
+				line = line.slice(0, markerIndex) + line.slice(markerIndex + CURSOR_MARKER.length);
+				markerIndex = line.indexOf(CURSOR_MARKER, markerIndex);
+			}
+			lines[row] = line;
+			if (!found) found = { row, col };
+		}
+		return found;
+	}
+
+	/**
+	 * Fast path for wheel-scroll repaints: when nothing content-affecting happened
+	 * since the last full render, re-slice the cached processed buffer instead of
+	 * re-rendering every component (which is O(total transcript lines) per tick).
+	 * Deliberately skips clearCopyRegions — regions registered during the last
+	 * component render stay valid because content is unchanged.
+	 * @returns true when the repaint was handled here.
+	 */
+	private tryScrollFastRender(width: number, height: number): boolean {
+		if (this.contentDirty) return false;
+		const cache = this.scrollRenderCache;
+		if (!cache || cache.width !== width || cache.height !== height) return false;
+		if (this.previousWidth !== width || this.previousHeight !== height) return false;
+		if (this.overlayStack.length > 0 || this.selectionState !== null) return false;
+		if (this.appViewportTop !== null) {
+			this.paintAppViewport(cache.lines, width, height, cache.cursorPos);
+			return true;
+		}
+		// Wheel-down just returned to follow-bottom: repaint the bottom slice from
+		// the cache (falls back to the full pipeline when the slice has image lines).
+		if (this.lastRenderUsedAppViewport || this.forceViewportFullRedraw) {
+			return this.paintBottomSlice(cache.lines, width, height, cache.cursorPos);
+		}
+		return false;
+	}
+
+	/**
+	 * Repaint the scrolled app viewport. Rewrites rows in place with per-row
+	 * clears instead of a full-screen 2J clear, which flashes on every wheel tick
+	 * in some terminals.
+	 */
+	private paintAppViewport(
+		bufferLines: string[],
+		width: number,
+		height: number,
+		cursorPos: { row: number; col: number } | null,
+	): void {
+		const appViewportTop = this.getAppViewportTop(bufferLines.length, height);
+		let visibleLines = bufferLines
+			.slice(appViewportTop, appViewportTop + height)
+			.map((line) => (isImageLine(line) ? "" : line));
+		while (visibleLines.length < height) visibleLines.push("");
+		visibleLines = renderAppViewportScrollbar(visibleLines, width, bufferLines.length, height, appViewportTop);
+		if (
+			this.lastRenderUsedAppViewport &&
+			!this.forceViewportFullRedraw &&
+			this.previousWidth === width &&
+			this.previousHeight === height &&
+			renderedLinesEqual(this.previousLines, visibleLines)
+		) {
+			this.previousViewportTop = appViewportTop;
+			return;
+		}
+		this.fullRedrawCount += 1;
+		let buffer = "\x1b[?2026h";
+		buffer += this.deleteKittyImages(this.previousKittyImageIds);
+		buffer += "\x1b[H";
+		for (let i = 0; i < visibleLines.length; i++) {
+			if (i > 0) buffer += "\r\n";
+			buffer += "\x1b[2K";
+			buffer += visibleLines[i];
+		}
+		buffer += "\x1b[?2026l";
+		this.terminal.write(buffer);
+		this.cursorRow = Math.max(0, visibleLines.length - 1);
+		this.hardwareCursorRow = this.cursorRow;
+		this.maxLinesRendered = Math.max(this.maxLinesRendered, visibleLines.length);
+		this.previousViewportTop = appViewportTop;
+		const viewportCursorPos =
+			cursorPos && cursorPos.row >= appViewportTop && cursorPos.row < appViewportTop + height
+				? { row: cursorPos.row - appViewportTop, col: cursorPos.col }
+				: null;
+		this.positionHardwareCursor(viewportCursorPos, visibleLines.length);
+		this.previousLines = visibleLines;
+		this.previousKittyImageIds = this.collectKittyImageIds(visibleLines);
+		this.previousWidth = width;
+		this.previousHeight = height;
+		this.lastRenderUsedAppViewport = true;
+		this.forceViewportFullRedraw = false;
+	}
+
+	/**
+	 * Repaint only the visible bottom slice when returning from app-viewport mode.
+	 * Rewriting the whole buffer here replays the entire transcript into the
+	 * terminal on every return-to-bottom wheel tick, which flashes the screen and
+	 * floods native scrollback. Bookkeeping still tracks the full buffer so the
+	 * normal differential renderer resumes seamlessly; lines that streamed in
+	 * while scrolled up simply never reach native scrollback (they stay reachable
+	 * through the app viewport).
+	 * @returns false when the visible slice contains Kitty image lines, which
+	 * this path cannot draw (caller must fall back to a full replay).
+	 */
+	private paintBottomSlice(
+		bufferLines: string[],
+		width: number,
+		height: number,
+		cursorPos: { row: number; col: number } | null,
+	): boolean {
+		const sliceTop = Math.max(0, bufferLines.length - height);
+		for (let i = sliceTop; i < bufferLines.length; i++) {
+			if (isImageLine(bufferLines[i])) return false;
+		}
+		this.fullRedrawCount += 1;
+		const contentRows = bufferLines.length - sliceTop;
+		let buffer = "\x1b[?2026h";
+		buffer += this.deleteKittyImages(this.previousKittyImageIds);
+		buffer += "\x1b[H";
+		for (let row = 0; row < height; row++) {
+			if (row > 0) buffer += "\r\n";
+			buffer += "\x1b[2K";
+			if (row < contentRows) buffer += bufferLines[sliceTop + row];
+		}
+		const moveUp = height - 1 - Math.max(0, contentRows - 1);
+		if (moveUp > 0) buffer += `\x1b[${moveUp}A`;
+		buffer += "\x1b[?2026l";
+		this.terminal.write(buffer);
+		this.cursorRow = Math.max(0, bufferLines.length - 1);
+		this.hardwareCursorRow = this.cursorRow;
+		this.maxLinesRendered = bufferLines.length;
+		const bufferLength = Math.max(height, bufferLines.length);
+		this.previousViewportTop = Math.max(0, bufferLength - height);
+		// A cached cursor position can sit above the bottom slice (marker outside the
+		// extraction window); positioning there would desync hardwareCursorRow.
+		const sliceCursorPos = cursorPos && cursorPos.row >= sliceTop ? cursorPos : null;
+		this.positionHardwareCursor(sliceCursorPos, bufferLines.length);
+		this.previousLines = bufferLines;
+		this.previousKittyImageIds = this.collectKittyImageIds(bufferLines);
+		this.previousWidth = width;
+		this.previousHeight = height;
+		this.lastRenderUsedAppViewport = false;
+		this.forceViewportFullRedraw = false;
+		return true;
+	}
+
 	private doRender(): void {
 		if (this.stopped) return;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
+		if (this.tryScrollFastRender(width, height)) return;
 		this.clearCopyRegions();
 		const widthChanged = this.previousWidth !== 0 && this.previousWidth !== width;
 		const heightChanged = this.previousHeight !== 0 && this.previousHeight !== height;
@@ -1987,6 +2180,18 @@ export class TUI extends Container {
 		newLines = this.applySelectionHighlight([...plainRenderedLines], width);
 
 		newLines = this.applyLineResets(newLines);
+
+		// Cache the processed buffer for the wheel-scroll fast path. Not cacheable
+		// while overlays or a selection are active: overlays are composited into the
+		// lines and selection highlight is baked in, so a scroll tick would repaint
+		// stale chrome.
+		this.contentDirty = false;
+		if (this.overlayStack.length === 0 && this.selectionState === null) {
+			const outsideCursorPos = this.stripCursorMarkers(newLines);
+			this.scrollRenderCache = { lines: newLines, cursorPos: cursorPos ?? outsideCursorPos, width, height };
+		} else {
+			this.scrollRenderCache = null;
+		}
 
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean, preserveScrollback = false): void => {
@@ -2035,87 +2240,16 @@ export class TUI extends Container {
 		};
 
 		const fullViewportRender = (): void => {
-			const appViewportTop = this.getAppViewportTop(newLines.length, height);
-			let visibleLines = newLines
-				.slice(appViewportTop, appViewportTop + height)
-				.map((line) => (isImageLine(line) ? "" : line));
-			while (visibleLines.length < height) visibleLines.push("");
-			visibleLines = renderAppViewportScrollbar(visibleLines, width, newLines.length, height, appViewportTop);
-			if (
-				this.lastRenderUsedAppViewport &&
-				!this.forceViewportFullRedraw &&
-				this.previousWidth === width &&
-				this.previousHeight === height &&
-				renderedLinesEqual(this.previousLines, visibleLines)
-			) {
-				this.previousViewportTop = appViewportTop;
-				return;
-			}
-			this.fullRedrawCount += 1;
-			let buffer = "\x1b[?2026h";
-			buffer += this.deleteKittyImages(this.previousKittyImageIds);
-			buffer += "\x1b[2J\x1b[H";
-			for (let i = 0; i < visibleLines.length; i++) {
-				if (i > 0) buffer += "\r\n";
-				buffer += visibleLines[i];
-			}
-			buffer += "\x1b[?2026l";
-			this.terminal.write(buffer);
-			this.cursorRow = Math.max(0, visibleLines.length - 1);
-			this.hardwareCursorRow = this.cursorRow;
-			this.maxLinesRendered = Math.max(this.maxLinesRendered, visibleLines.length);
-			this.previousViewportTop = appViewportTop;
-			const viewportCursorPos =
-				cursorPos && cursorPos.row >= appViewportTop && cursorPos.row < appViewportTop + height
-					? { row: cursorPos.row - appViewportTop, col: cursorPos.col }
-					: null;
-			this.positionHardwareCursor(viewportCursorPos, visibleLines.length);
-			this.previousLines = visibleLines;
-			this.previousKittyImageIds = this.collectKittyImageIds(visibleLines);
-			this.previousWidth = width;
-			this.previousHeight = height;
-			this.lastRenderUsedAppViewport = true;
-			this.forceViewportFullRedraw = false;
+			this.paintAppViewport(newLines, width, height, cursorPos);
 		};
 
-		// Repaint only the visible bottom slice when returning from app-viewport mode.
-		// Rewriting the whole buffer here replays the entire transcript into the
-		// terminal on every return-to-bottom wheel tick, which flashes the screen and
-		// floods native scrollback. Bookkeeping still tracks the full buffer so the
-		// normal differential renderer resumes seamlessly; lines that streamed in
-		// while scrolled up simply never reach native scrollback (they stay reachable
-		// through the app viewport). Falls back to a full replay when the visible
-		// slice contains Kitty image lines, which the slice path cannot draw.
+		// Repaint only the visible bottom slice when returning from app-viewport mode
+		// (see paintBottomSlice). Falls back to a full replay when the visible slice
+		// contains Kitty image lines, which the slice path cannot draw.
 		const bottomSliceRender = (): void => {
-			const sliceTop = Math.max(0, newLines.length - height);
-			for (let i = sliceTop; i < newLines.length; i++) {
-				if (isImageLine(newLines[i])) {
-					fullRender(true, true);
-					return;
-				}
+			if (!this.paintBottomSlice(newLines, width, height, cursorPos)) {
+				fullRender(true, true);
 			}
-			this.fullRedrawCount += 1;
-			let buffer = "\x1b[?2026h";
-			buffer += this.deleteKittyImages(this.previousKittyImageIds);
-			buffer += "\x1b[2J\x1b[H";
-			for (let i = sliceTop; i < newLines.length; i++) {
-				if (i > sliceTop) buffer += "\r\n";
-				buffer += newLines[i];
-			}
-			buffer += "\x1b[?2026l";
-			this.terminal.write(buffer);
-			this.cursorRow = Math.max(0, newLines.length - 1);
-			this.hardwareCursorRow = this.cursorRow;
-			this.maxLinesRendered = newLines.length;
-			const bufferLength = Math.max(height, newLines.length);
-			this.previousViewportTop = Math.max(0, bufferLength - height);
-			this.positionHardwareCursor(cursorPos, newLines.length);
-			this.previousLines = newLines;
-			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
-			this.previousWidth = width;
-			this.previousHeight = height;
-			this.lastRenderUsedAppViewport = false;
-			this.forceViewportFullRedraw = false;
 		};
 
 		const debugRedraw = process.env.PI_DEBUG_REDRAW === "1";
