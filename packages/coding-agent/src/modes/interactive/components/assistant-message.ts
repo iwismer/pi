@@ -136,18 +136,24 @@ export class AssistantMessageComponent extends Container {
 					(c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()),
 				);
 				const hasToolCallAfter = laterContent.some((c) => c.type === "toolCall");
-				const shouldHideThinkingBlock = this.hideThinkingBlock && (hasVisibleContentAfter || hasToolCallAfter);
+				const shouldHideThinkingRun = this.hideThinkingBlock && (hasVisibleContentAfter || hasToolCallAfter);
+				const hasEarlierThinkingInCurrentRun = this.hideThinkingBlock && thinkingBlocks.length > 1;
 
-				if (shouldHideThinkingBlock) {
-					// Show one static label for each non-current run of thinking blocks when hidden.
+				if (shouldHideThinkingRun || hasEarlierThinkingInCurrentRun) {
+					// Coalesce non-current thinking into one static label.
 					this.contentContainer.addChild(
 						new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0),
 					);
-				} else {
-					// Render each run of thinking blocks as one Markdown section.
+				}
+				if (!shouldHideThinkingRun) {
+					if (hasEarlierThinkingInCurrentRun) {
+						this.contentContainer.addChild(new Spacer(1));
+					}
+					// In hidden mode, only the latest thinking block in the current run remains visible.
+					const visibleThinking = this.hideThinkingBlock ? thinkingBlocks.at(-1)! : thinkingBlocks.join("\n\n");
 					this.contentContainer.addChild(
 						new Markdown(
-							thinkingBlocks.join("\n\n"),
+							visibleThinking,
 							this.outputPad,
 							0,
 							this.markdownTheme,
