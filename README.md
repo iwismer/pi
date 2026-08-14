@@ -23,8 +23,8 @@ Current fork-only changes:
 - `pi.runWhenIdle(callback)` gives extensions a safe idle boundary with command context, plus extension lifecycle signals for retry settlement (`agent_end.willRetry` and `auto_retry_end`).
 - Assistant thinking collapse keeps the current/latest hidden thinking visible until later visible content, later thinking, or a tool call makes it non-current.
 - Automatic theme detection prefers the actual terminal background color when available before falling back to terminal color-scheme reports.
-- Interactive mode supports app-owned mouse selection copying and copyable `[copy]` regions for messages and tool output.
-- `pi-tui` supports prompt mouse clicks, app-owned wheel scrolling, a visible scrollback viewport with scrollbar, active-viewport cursor handling, and stable viewport anchoring across bottom-of-buffer shrink/growth.
+
+Mouse selection, clipboard copying, and the app-owned scrollable viewport now use upstream Pi's fullscreen renderer and are no longer fork-only changes.
 
 When changing Pi core, TUI, renderer, or extension APIs for Isaac's local runtime, make the source change in this fork, build the affected package, then reinstall and verify the local runtime.
 
