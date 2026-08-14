@@ -69,7 +69,8 @@ describe("AssistantMessageComponent", () => {
 		);
 		const rendered = component.render(80).join("\n");
 
-		expect(rendered).toContain("Thinking...");
+		expect(rendered).toContain("private reasoning");
+		expect(rendered).not.toContain("Thinking...");
 		expect(rendered).toContain("Response was truncated before completion.");
 	});
 

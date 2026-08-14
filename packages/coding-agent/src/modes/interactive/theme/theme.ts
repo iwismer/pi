@@ -815,7 +815,8 @@ export async function detectTerminalThemeForAuto({
 }: TerminalAutoThemeDetectionOptions): Promise<TerminalTheme> {
 	let colorSchemePromise: Promise<TerminalTheme | undefined> | undefined;
 	try {
-		colorSchemePromise = ui.queryTerminalColorScheme?.({ timeoutMs });
+		const query = ui.queryTerminalColorScheme?.({ timeoutMs });
+		colorSchemePromise = query?.catch(() => undefined);
 	} catch {
 		// Fall back to OSC 11 / COLORFGBG detection when starting the color-scheme query fails.
 	}
