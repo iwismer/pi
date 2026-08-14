@@ -346,8 +346,6 @@ export interface ExtensionContext {
 	getSystemPrompt(): string;
 }
 
-export type RunWhenIdleCallback = (ctx: ExtensionCommandContext) => Promise<void> | void;
-
 /**
  * Extended context for command handlers.
  * Includes session control methods only safe in user-initiated commands.
@@ -735,15 +733,6 @@ export interface AgentStartEvent {
 export interface AgentEndEvent {
 	type: "agent_end";
 	messages: AgentMessage[];
-	willRetry?: boolean;
-}
-
-/** Fired when an automatic retry finishes without another agent_end, such as cancellation during backoff. */
-export interface AutoRetryEndEvent {
-	type: "auto_retry_end";
-	success: boolean;
-	attempt: number;
-	finalError?: string;
 }
 
 /** Fired after an agent run has fully settled and no automatic retry, compaction, or queued continuation will run. */
@@ -1069,7 +1058,6 @@ export type ExtensionEvent =
 	| BeforeAgentStartEvent
 	| AgentStartEvent
 	| AgentEndEvent
-	| AutoRetryEndEvent
 	| AgentSettledEvent
 	| TurnStartEvent
 	| TurnEndEvent
@@ -1256,7 +1244,6 @@ export interface ExtensionAPI {
 	on(event: "before_agent_start", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
-	on(event: "auto_retry_end", handler: ExtensionHandler<AutoRetryEndEvent>): void;
 	on(event: "agent_settled", handler: ExtensionHandler<AgentSettledEvent>): void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): void;
 	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>): void;
@@ -1349,9 +1336,6 @@ export interface ExtensionAPI {
 		content: string | (TextContent | ImageContent)[],
 		options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
 	): void;
-
-	/** Defer work until the current agent turn is fully idle, with command context available. */
-	runWhenIdle(callback: RunWhenIdleCallback): void;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
@@ -1666,7 +1650,6 @@ export interface ExtensionRuntimeState {
 export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
-	runWhenIdle: (callback: RunWhenIdleCallback) => void;
 	appendEntry: AppendEntryHandler;
 	setSessionName: SetSessionNameHandler;
 	getSessionName: GetSessionNameHandler;
