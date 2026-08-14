@@ -326,7 +326,6 @@ export class ExtensionRunner {
 		// Copy actions into the shared runtime (all extension APIs reference this)
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
-		this.runtime.runWhenIdle = actions.runWhenIdle;
 		this.runtime.appendEntry = actions.appendEntry;
 		this.runtime.setSessionName = actions.setSessionName;
 		this.runtime.getSessionName = actions.getSessionName;
@@ -589,10 +588,6 @@ export class ExtensionRunner {
 
 	getShortcutDiagnostics(): ResourceDiagnostic[] {
 		return this.shortcutDiagnostics;
-	}
-
-	get isStale(): boolean {
-		return this.staleMessage !== undefined;
 	}
 
 	invalidate(

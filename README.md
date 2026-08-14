@@ -20,9 +20,10 @@ This fork carries Isaac's source-level Pi runtime customizations for local runti
 
 Current fork-only changes:
 
-- `pi.runWhenIdle(callback)` gives extensions a safe idle boundary with command context, plus extension lifecycle signals for retry settlement (`agent_end.willRetry` and `auto_retry_end`).
 - Assistant thinking collapse keeps the current/latest hidden thinking visible until later visible content, later thinking, or a tool call makes it non-current.
 - Automatic theme detection prefers the actual terminal background color when available before falling back to terminal color-scheme reports.
+
+Extension settlement, retries, and command dispatch now use upstream Pi lifecycle APIs; this fork no longer carries a custom extension lifecycle surface.
 
 Mouse selection, clipboard copying, and the app-owned scrollable viewport now use upstream Pi's fullscreen renderer and are no longer fork-only changes.
 
