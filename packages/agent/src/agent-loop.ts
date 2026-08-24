@@ -758,7 +758,11 @@ async function finalizeExecutedToolCall(
 function createErrorToolResult(message: string): AgentToolResult<any> {
 	return {
 		content: [{ type: "text", text: message }],
-		details: {},
+		// Deliberately undefined rather than `{}`: renderers discriminate on their
+		// own details shape (`if (!details) ...` / `switch (details.action)`), and a
+		// truthy-but-empty object made every one of those guards fall through on
+		// failed calls (validation errors, aborts, blocked tools).
+		details: undefined,
 	};
 }
 
