@@ -21,7 +21,6 @@ This fork carries Isaac's source-level Pi runtime customizations for local runti
 Current fork-only changes:
 
 - Assistant thinking collapse keeps the current/latest hidden thinking visible until later visible content, later thinking, or a tool call makes it non-current.
-- Automatic theme detection prefers the actual terminal background color when available before falling back to terminal color-scheme reports.
 
 Extension settlement, retries, and command dispatch now use upstream Pi lifecycle APIs; this fork no longer carries a custom extension lifecycle surface.
 
