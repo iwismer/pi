@@ -39,6 +39,18 @@ import { keyHint } from "./keybinding-hints.ts";
 
 const FALLBACK_PREVIEW_LINES = 10;
 
+/**
+ * Tool renderers are extension-provided, so they can return anything at runtime
+ * (a missing `default:` in a `switch` silently yields `undefined`). Adding a
+ * non-component to a container makes the next layout pass throw
+ * "Cannot read properties of undefined (reading 'render')", which kills the TUI
+ * and keeps killing it every time the transcript is re-rendered (e.g. on session
+ * resume). Validate the return value and fall back instead.
+ */
+function isRenderable(value: unknown): value is Component {
+	return typeof (value as Component | undefined)?.render === "function";
+}
+
 export interface ToolExecutionOptions {
 	showImages?: boolean;
 	imageWidthCells?: number;
@@ -317,6 +329,9 @@ export class ToolExecutionComponent extends Container {
 			} else {
 				try {
 					const component = callRenderer(this.args, theme, this.getRenderContext(this.callRendererComponent));
+					if (!isRenderable(component)) {
+						throw new Error(`renderCall for tool "${this.toolName}" did not return a component`);
+					}
 					this.callRendererComponent = component;
 					renderContainer.addChild(this.createResultRegion(component));
 					hasContent = true;
@@ -343,6 +358,9 @@ export class ToolExecutionComponent extends Container {
 							theme,
 							this.getRenderContext(this.resultRendererComponent),
 						);
+						if (!isRenderable(component)) {
+							throw new Error(`renderResult for tool "${this.toolName}" did not return a component`);
+						}
 						this.resultRendererComponent = component;
 						renderContainer.addChild(this.createResultRegion(component));
 						hasContent = true;
