@@ -101,9 +101,9 @@ describe("detectTerminalBackgroundTheme", () => {
 });
 
 describe("detectTerminalThemeForAuto", () => {
-	it("starts both queries and uses color-scheme when no high-confidence background is available", async () => {
+	it("starts both queries and returns the preferred color-scheme result without waiting", async () => {
 		let resolveColorScheme!: (theme: "dark" | "light" | undefined) => void;
-		let resolveBackground!: (rgb: RgbColor | undefined) => void;
+		let backgroundQueryStarted = false;
 		const detection = detectTerminalThemeForAuto({
 			timeoutMs: 100,
 			ui: {
@@ -111,32 +111,16 @@ describe("detectTerminalThemeForAuto", () => {
 					new Promise((resolve) => {
 						resolveColorScheme = resolve;
 					}),
-				queryTerminalBackgroundColor: () =>
-					new Promise((resolve) => {
-						resolveBackground = resolve;
-					}),
+				queryTerminalBackgroundColor: () => {
+					backgroundQueryStarted = true;
+					return new Promise<RgbColor | undefined>(() => {});
+				},
 			},
 		});
 
+		expect(backgroundQueryStarted).toBe(true);
 		resolveColorScheme("dark");
-		resolveBackground(undefined);
 		await expect(detection).resolves.toBe("dark");
-	});
-
-	it("prefers a high-confidence actual background over the reported color scheme", async () => {
-		await expect(
-			detectTerminalThemeForAuto({
-				timeoutMs: 100,
-				ui: {
-					async queryTerminalColorScheme(): Promise<"dark"> {
-						return "dark";
-					},
-					async queryTerminalBackgroundColor(): Promise<RgbColor> {
-						return { r: 250, g: 250, b: 250 };
-					},
-				},
-			}),
-		).resolves.toBe("light");
 	});
 
 	it("uses the background result when the color-scheme query fails", async () => {
