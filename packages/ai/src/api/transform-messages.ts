@@ -156,10 +156,15 @@ export function transformMessages<TApi extends Api>(
 	});
 
 	// Second pass: insert synthetic empty tool results for orphaned tool calls
-	// This preserves thinking signatures and satisfies API requirements
+	// and drop tool results whose assistant was skipped (error/aborted).
+	// This preserves thinking signatures and satisfies API requirements.
 	const result: Message[] = [];
 	let pendingToolCalls: ToolCall[] = [];
 	let existingToolResultIds = new Set<string>();
+	// Tool call IDs from skipped error/aborted assistants. Their tool results
+	// must be dropped too — otherwise the API receives tool_result blocks
+	// with no matching tool_use, causing a 400 rejection.
+	let droppedToolCallIds = new Set<string>();
 	const insertSyntheticToolResults = () => {
 		if (pendingToolCalls.length > 0) {
 			for (const tc of pendingToolCalls) {
@@ -193,8 +198,17 @@ export function transformMessages<TApi extends Api>(
 			// - The model should retry from the last valid state
 			const assistantMsg = msg as AssistantMessage;
 			if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
+				// Collect tool call IDs so their orphaned tool results get dropped
+				// instead of sent to the API without a matching tool_use block.
+				const skippedToolCalls = assistantMsg.content.filter((b) => b.type === "toolCall") as ToolCall[];
+				for (const tc of skippedToolCalls) {
+					droppedToolCallIds.add(tc.id);
+				}
 				continue;
 			}
+
+			// New valid assistant — clear dropped IDs from any previous skipped assistant
+			droppedToolCallIds = new Set();
 
 			// Track tool calls from this assistant message
 			const toolCalls = assistantMsg.content.filter((b) => b.type === "toolCall") as ToolCall[];
@@ -205,13 +219,19 @@ export function transformMessages<TApi extends Api>(
 
 			result.push(msg);
 		} else if (msg.role === "toolResult") {
+			// Drop tool results whose tool call was from a skipped error/aborted assistant
+			if (droppedToolCallIds.has(msg.toolCallId)) {
+				continue;
+			}
 			existingToolResultIds.add(msg.toolCallId);
 			result.push(msg);
 		} else if (msg.role === "user") {
 			// User message interrupts tool flow - insert synthetic results for orphaned calls
 			insertSyntheticToolResults();
+			droppedToolCallIds = new Set();
 			result.push(msg);
 		} else {
+			droppedToolCallIds = new Set();
 			result.push(msg);
 		}
 	}
