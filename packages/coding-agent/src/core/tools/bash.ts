@@ -150,13 +150,29 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 }
 
 /**
+ * zsh aborts an entire command line when a glob matches nothing (its default
+ * `nomatch` option), so `grep -n foo /nonexistent/*.md` or
+ * `grep -rn foo dir --include=*.ts` fails before the command ever runs. The tool
+ * then reports "no matches found", which reads like an empty search result.
+ *
+ * bash and sh pass unmatched patterns through literally. This preamble restores
+ * that behavior whenever the configured shell (or a wrapper script it points at)
+ * is zsh. Shells without a `setopt` builtin report an unknown command, which is
+ * swallowed, so the preamble is a no-op everywhere else.
+ */
+export const UNMATCHED_GLOB_PREAMBLE = "setopt nonomatch 2>/dev/null || true\n";
+
+/**
  * Create bash operations using pi's built-in local shell execution backend.
  *
  * This is useful for extensions that intercept user_bash and still want pi's
  * standard local shell behavior while wrapping or rewriting commands.
  */
 export function createLocalBashOperations(options?: { shellPath?: string }): BashOperations {
-	return createLocalShellOperations("bash", () => getShellConfig(options?.shellPath));
+	const operations = createLocalShellOperations("bash", () => getShellConfig(options?.shellPath));
+	return {
+		exec: (command, cwd, execOptions) => operations.exec(`${UNMATCHED_GLOB_PREAMBLE}${command}`, cwd, execOptions),
+	};
 }
 
 export interface BashSpawnContext {
