@@ -10,6 +10,7 @@ import {
 	createBashTool,
 	createBashToolDefinition,
 	createLocalBashOperations,
+	UNMATCHED_GLOB_PREAMBLE,
 } from "../src/core/tools/bash.ts";
 import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { computeEditsDiff } from "../src/core/tools/edit-diff.ts";
@@ -602,7 +603,8 @@ describe("Coding Agent Tools", () => {
 			});
 
 			expect(result.exitCode).toBe(0);
-			expect(Buffer.concat(chunks).toString("utf-8")).toBe(command);
+			// The unmatched-glob preamble is part of the command, including over stdin.
+			expect(Buffer.concat(chunks).toString("utf-8")).toBe(`${UNMATCHED_GLOB_PREAMBLE}${command}`);
 		});
 
 		it("should resolve legacy WSL bash.exe to stdin command transport", () => {
