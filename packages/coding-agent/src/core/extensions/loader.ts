@@ -18,6 +18,7 @@ import { execCommand } from "../exec.ts";
 import { readPiManifest } from "../pi-manifest.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
 import { time } from "../timings.ts";
+import { registerExtensionModuleScope, setExtensionModuleGeneration } from "./module-reload.ts";
 import type {
 	EntryRenderer,
 	Extension,
@@ -135,6 +136,9 @@ export function clearExtensionCache(): void {
 	extensionCache.clear();
 	extensionCacheCwd = undefined;
 	extensionCacheGeneration++;
+	// Node caches ESM modules by URL, so reloaded extensions would otherwise link
+	// against the module instances loaded before the cache was cleared.
+	setExtensionModuleGeneration(extensionCacheGeneration);
 }
 
 function useExtensionCacheCwd(cwd: string): ExtensionCacheToken {
@@ -483,6 +487,8 @@ async function loadExtensionModule(extensionPath: string, cacheToken?: Extension
 			return cachedFactory;
 		}
 	}
+
+	registerExtensionModuleScope(extensionPath);
 
 	const createJitiImpl = await getCreateJiti();
 	// Compiled binaries and the bundled Node distribution use embedded modules.
