@@ -1324,6 +1324,22 @@ Important behavior:
 
 For predictable behavior, treat reload as terminal for that handler (`await ctx.reload(); return;`).
 
+### Reload and module caching
+
+Reload re-imports the extension entry and the local modules it imports (for example
+`../lib/helper.mjs`), transitively, so edits to helper modules take effect without
+restarting pi. Two things are deliberately *not* re-instantiated:
+
+- anything under a `node_modules` directory (extensions keep sharing those instances
+  with pi and with each other)
+- pi's own package modules
+
+Each reload also leaves the previous generation of extension modules in Node's module
+registry, so module-level state does not survive a reload; keep durable state on disk
+or in the session. Fresh module instances require `module.registerHooks()`
+(Node >= 22.15); on runtimes without it, such as the Bun binary, reload can still serve
+the previously loaded copy of a local helper module.
+
 Tools run with `ExtensionContext`, so they cannot call `ctx.reload()` directly. Use a command as the reload entrypoint, then expose a tool that queues that command as a follow-up user message.
 
 Example tool the LLM can call to trigger reload:
