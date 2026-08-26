@@ -553,12 +553,12 @@ In print mode, pi also reads piped stdin and merges it into the initial prompt:
 cat README.md | pi -p "Summarize this text"
 ```
 
-When a prompt argument is present, pi waits at most 2 seconds for the first byte
-of piped stdin, then continues with the prompt argument alone and warns on
+When a prompt or `@file` argument is present, pi waits at most 2 seconds for the
+first byte of piped stdin, then continues with that argument alone and warns on
 stderr. This keeps pi from blocking forever when a parent process spawns it with
-an open but unused stdin pipe. Once stdin delivers its first chunk, pi reads it
-to completion. With no prompt argument, pi still waits for stdin indefinitely,
-since stdin is the prompt.
+an open but unused stdin pipe. Once stdin delivers its first chunk, pi waits for
+EOF and reads it to completion. With no prompt argument, pi still waits for
+stdin indefinitely, since stdin is the prompt.
 
 ### Model Options
 

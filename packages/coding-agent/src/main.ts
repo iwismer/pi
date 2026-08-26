@@ -848,11 +848,11 @@ export async function main(args: string[], options?: MainOptions) {
 	if (appMode !== "rpc") {
 		stdinContent = await readPipedStdin({
 			stream: process.stdin,
-			hasExplicitPrompt: parsed.messages.length > 0,
+			hasExplicitPrompt: parsed.messages.length > 0 || parsed.fileArgs.length > 0,
 			onIdleTimeout: () =>
 				console.error(
 					chalk.yellow(
-						`Warning: stdin is an open pipe with no data after ${STDIN_FIRST_CHUNK_TIMEOUT_MS}ms; continuing with the prompt argument only.`,
+						`Warning: stdin is an open pipe with no data after ${STDIN_FIRST_CHUNK_TIMEOUT_MS}ms; continuing with the explicit input only.`,
 					),
 				),
 		});
