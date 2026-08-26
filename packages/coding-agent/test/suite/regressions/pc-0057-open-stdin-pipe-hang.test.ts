@@ -47,9 +47,23 @@ describe("readPipedStdin", () => {
 		});
 		expect(content).toBeUndefined();
 
+		expect(stream.listenerCount("data")).toBe(0);
+		expect(stream.listenerCount("end")).toBe(0);
 		stream.write("late data");
 		stream.end();
 		await new Promise((resolve) => setTimeout(resolve, 20));
+	});
+
+	it("handles a stdin stream error without crashing", async () => {
+		const stream = createPipe();
+		const pending = readPipedStdin({
+			stream,
+			hasExplicitPrompt: true,
+			idleTimeoutMs: 100,
+		});
+
+		stream.emit("error", new Error("stdin failed"));
+		expect(await pending).toBeUndefined();
 	});
 
 	it("reads piped content to completion once the first chunk arrives", async () => {

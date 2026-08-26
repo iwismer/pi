@@ -39,6 +39,16 @@ export async function readPipedStdin(options: ReadPipedStdinOptions): Promise<st
 		let data = "";
 		let timeout: NodeJS.Timeout | undefined;
 
+		const cleanup = () => {
+			if (timeout) clearTimeout(timeout);
+			stream.off("data", onData);
+			stream.off("end", onEnd);
+			stream.off("error", onError);
+		};
+		const finish = () => {
+			cleanup();
+			resolve(data.trim() || undefined);
+		};
 		const onData = (chunk: string) => {
 			if (timeout) {
 				clearTimeout(timeout);
@@ -46,19 +56,17 @@ export async function readPipedStdin(options: ReadPipedStdinOptions): Promise<st
 			}
 			data += chunk;
 		};
-		const onEnd = () => {
-			if (timeout) clearTimeout(timeout);
-			resolve(data.trim() || undefined);
-		};
+		const onEnd = () => finish();
+		const onError = () => finish();
 
 		stream.setEncoding("utf8");
 		stream.on("data", onData);
 		stream.once("end", onEnd);
+		stream.once("error", onError);
 
 		if (hasExplicitPrompt) {
 			timeout = setTimeout(() => {
-				stream.off("data", onData);
-				stream.off("end", onEnd);
+				cleanup();
 				// Stop holding the event loop open on a pipe nobody is writing to.
 				stream.pause();
 				stream.unref?.();
