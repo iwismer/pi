@@ -35,6 +35,8 @@ With terminal stdin and stdout, Pi opens the terminal UI unless `--print`, `--mo
 | Piped stdin | Prepend its contents to the first prompt |
 | `--` | Stop option parsing so a prompt can begin with `-` |
 
+When a prompt argument is present, pi waits at most 2 seconds for piped stdin's first byte, then continues with the prompt argument alone and warns on stderr. This keeps pi from blocking forever when a parent process spawns it with an open but unused stdin pipe. Once stdin delivers its first chunk, pi reads it to completion. With no prompt argument, pi still waits for stdin indefinitely, since stdin is the prompt.
+
 Pi resolves `@path` from the current working directory. The working directory also controls project configuration, resource discovery, and session grouping.
 
 `--print` controls whether Pi runs once and exits. `--mode` selects the output interface. `--mode text` does not force one-shot execution when stdin and stdout are terminals; use `--print` for that behavior.
