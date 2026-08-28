@@ -75,10 +75,12 @@ import {
 	type ExtensionMode,
 	ExtensionRunner,
 	type ExtensionUIContext,
+	type FailoverModelRef,
 	type InputSource,
 	type MessageEndEvent,
 	type MessageStartEvent,
 	type MessageUpdateEvent,
+	type ModelSelectSource,
 	type ReplacedSessionContext,
 	type SessionBeforeCompactResult,
 	type SessionBeforeTreeResult,
@@ -168,6 +170,7 @@ export type AgentSessionEvent =
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| { type: "model_failover"; from: FailoverModelRef; to: FailoverModelRef; reason: string }
 	| {
 			type: "summarization_retry_scheduled";
 			attempt: number;
@@ -337,6 +340,8 @@ export class AgentSession {
 	// Retry state
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
+	/** Models used during the current run, oldest first. Reset whenever the retry counter resets. */
+	private _failoverTriedModels: FailoverModelRef[] = [];
 
 	// Bash execution state
 	private readonly _bashAbortControllers = new Set<AbortController>();
@@ -704,6 +709,7 @@ export class AgentSession {
 						attempt: this._retryAttempt,
 					});
 					this._retryAttempt = 0;
+					this._resetFailoverTracking();
 				}
 			}
 		}
@@ -1100,6 +1106,7 @@ export class AgentSession {
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
 		this._isAgentRunActive = true;
+		this._resetFailoverTracking();
 		try {
 			await this.agent.prompt(messages);
 			while (await this._handlePostAgentRun()) {
@@ -1132,6 +1139,7 @@ export class AgentSession {
 				finalError: msg.errorMessage,
 			});
 			this._retryAttempt = 0;
+			this._resetFailoverTracking();
 		}
 
 		if (await this._checkCompaction(msg)) {
@@ -1659,7 +1667,7 @@ export class AgentSession {
 	private async _emitModelSelect(
 		nextModel: Model<any>,
 		previousModel: Model<any> | undefined,
-		source: "set" | "cycle" | "restore",
+		source: ModelSelectSource,
 	): Promise<void> {
 		if (modelsAreEqual(previousModel, nextModel)) return;
 		await this._extensionRunner.emit({
@@ -1677,6 +1685,14 @@ export class AgentSession {
 	 * @throws Error if no auth is configured for the model
 	 */
 	async setModel(model: Model<any>, options: ModelMutationOptions = {}): Promise<void> {
+		await this._applyModel(model, options, "set");
+	}
+
+	private async _applyModel(
+		model: Model<any>,
+		options: ModelMutationOptions,
+		source: ModelSelectSource,
+	): Promise<void> {
 		if (!(await this._modelRuntime.checkAuth(model.provider))) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
@@ -1695,7 +1711,7 @@ export class AgentSession {
 		// Model persistence does not implicitly rewrite the global thinking default.
 		this.setThinkingLevel(thinkingLevel);
 
-		await this._emitModelSelect(model, previousModel, "set");
+		await this._emitModelSelect(model, previousModel, source);
 	}
 
 	private _addPersistedDefaultToNonEmptyScope(model: Model<any>): void {
@@ -2925,7 +2941,12 @@ export class AgentSession {
 		if (this._retryAttempt > settings.maxRetries) {
 			// Preserve the completed attempt count so post-run handling can emit the final failure.
 			this._retryAttempt--;
+			this._resetFailoverTracking();
 			return false;
+		}
+
+		if (this._extensionRunner.hasHandlers("model_failover")) {
+			await this._tryModelFailover(message, settings.maxRetries);
 		}
 
 		const delayMs = retryDelayMs(settings, this._retryAttempt);
@@ -2952,6 +2973,7 @@ export class AgentSession {
 			// Aborted during sleep - emit end event so UI can clean up
 			const attempt = this._retryAttempt;
 			this._retryAttempt = 0;
+			this._resetFailoverTracking();
 			this._emit({
 				type: "auto_retry_end",
 				success: false,
@@ -2964,6 +2986,62 @@ export class AgentSession {
 		}
 
 		return true;
+	}
+
+	private _resetFailoverTracking(): void {
+		const model = this.model;
+		this._failoverTriedModels = model ? [{ provider: model.provider, id: model.id }] : [];
+	}
+
+	/**
+	 * Give extensions a chance to swap in a different model before the retry runs.
+	 * A replacement that cannot be resolved or authenticated is ignored, keeping the current model.
+	 */
+	private async _tryModelFailover(message: AssistantMessage, maxAttempts: number): Promise<void> {
+		const currentModel = this.model;
+		if (!currentModel) return;
+
+		const errorMessage = message.errorMessage || "Unknown error";
+		const from: FailoverModelRef = { provider: currentModel.provider, id: currentModel.id };
+		const result = await this._extensionRunner.emitModelFailover({
+			type: "model_failover",
+			errorMessage,
+			attempt: this._retryAttempt,
+			maxAttempts,
+			model: from,
+			triedModels: [...this._failoverTriedModels],
+		});
+		if (!result) return;
+
+		const to = result.model;
+		const nextModel = this._modelRuntime.getModel(to.provider, to.id);
+		if (!nextModel) {
+			this._extensionRunner.emitError({
+				extensionPath: "<runtime>",
+				event: "model_failover",
+				error: `Unknown failover model ${to.provider}/${to.id}`,
+			});
+			return;
+		}
+
+		try {
+			await this._applyModel(nextModel, {}, "failover");
+		} catch (err) {
+			this._extensionRunner.emitError({
+				extensionPath: "<runtime>",
+				event: "model_failover",
+				error: err instanceof Error ? err.message : String(err),
+			});
+			return;
+		}
+
+		this._failoverTriedModels.push({ provider: nextModel.provider, id: nextModel.id });
+		this._emit({
+			type: "model_failover",
+			from,
+			to: { provider: nextModel.provider, id: nextModel.id },
+			reason: errorMessage,
+		});
 	}
 
 	/**
