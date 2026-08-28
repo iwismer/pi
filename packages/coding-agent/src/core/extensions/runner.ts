@@ -43,6 +43,8 @@ import type {
 	MessageEndEvent,
 	MessageEndEventResult,
 	MessageRenderer,
+	ModelFailoverEvent,
+	ModelFailoverEventResult,
 	ProjectTrustContext,
 	ProjectTrustEvent,
 	ProjectTrustEventResult,
@@ -922,6 +924,40 @@ export class ExtensionRunner {
 		}
 
 		return modified ? currentMessage : undefined;
+	}
+
+	/**
+	 * Ask extensions for a replacement model before an auto-retry.
+	 * Handlers run in load order; the last returned model wins.
+	 */
+	async emitModelFailover(event: ModelFailoverEvent): Promise<ModelFailoverEventResult | undefined> {
+		const ctx = this.createContext();
+		let result: ModelFailoverEventResult | undefined;
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("model_failover");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				try {
+					const handlerResult = (await handler(event, ctx)) as ModelFailoverEventResult | undefined;
+					if (handlerResult?.model) {
+						result = handlerResult;
+					}
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					const stack = err instanceof Error ? err.stack : undefined;
+					this.emitError({
+						extensionPath: ext.path,
+						event: "model_failover",
+						error: message,
+						stack,
+					});
+				}
+			}
+		}
+
+		return result;
 	}
 
 	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {

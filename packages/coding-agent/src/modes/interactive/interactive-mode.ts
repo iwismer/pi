@@ -3461,6 +3461,16 @@ export class InteractiveMode {
 				break;
 			}
 
+			case "model_failover": {
+				this.footer.invalidate();
+				this.updateEditorBorderColor();
+				this.showWarning(
+					`Model failover: ${event.from.provider}/${event.from.id} -> ${event.to.provider}/${event.to.id} (${event.reason})`,
+				);
+				this.ui.requestRender();
+				break;
+			}
+
 			case "auto_retry_start": {
 				// Set up escape to abort retry
 				this.retryEscapeHandler = this.defaultEditor.onEscape;
