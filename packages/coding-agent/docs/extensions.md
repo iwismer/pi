@@ -341,6 +341,10 @@ user sends another prompt ◄─────────────────
   ├─► thinking_level_select (if model change changes/clamps thinking level)
   └─► model_select
 
+auto-retry of a retryable request failure
+  ├─► model_failover (can return a replacement model)
+  └─► model_select { source: "failover" } (if a replacement was applied)
+
 thinking level changes (settings, keybinding, pi.setThinkingLevel())
   └─► thinking_level_select
 
@@ -739,13 +743,13 @@ Header availability depends on provider and transport. Providers that abstract H
 
 #### model_select
 
-Fired when the model changes via `/model` command, model cycling (`Ctrl+P`), or session restore.
+Fired when the model changes via `/model` command, model cycling (`Ctrl+P`), session restore, or model failover.
 
 ```typescript
 pi.on("model_select", async (event, ctx) => {
   // event.model - newly selected model
   // event.previousModel - previous model (undefined if first selection)
-  // event.source - "set" | "cycle" | "restore"
+  // event.source - "set" | "cycle" | "restore" | "failover"
 
   const prev = event.previousModel
     ? `${event.previousModel.provider}/${event.previousModel.id}`
@@ -757,6 +761,35 @@ pi.on("model_select", async (event, ctx) => {
 ```
 
 Use this to update UI elements (status bars, footers) or perform model-specific initialization when the active model changes.
+
+#### model_failover
+
+Fired before an auto-retry of a retryable request failure (rate limit, overload, transient server or network error), after the retry budget check and before the retry backoff. Use it to move a run onto a fallback model instead of retrying the model that just failed.
+
+Return `{ model: { provider, id } }` to switch models for this retry, or `undefined` to keep the current model. Handlers run in extension load order; the last returned model wins. A returned model that is not in the model registry, or that has no configured auth, is ignored and the current model is kept.
+
+```typescript
+const FALLBACKS = [
+  { provider: "anthropic", id: "claude-sonnet-4-5" },
+  { provider: "openai", id: "gpt-5" },
+];
+
+pi.on("model_failover", (event, ctx) => {
+  // event.errorMessage - error from the failed assistant message
+  // event.attempt / event.maxAttempts - upcoming retry attempt (1-based) and retry budget
+  // event.model - { provider, id } that just failed
+  // event.triedModels - models used in this run so far, including the current one
+
+  const tried = new Set(event.triedModels.map((m) => `${m.provider}/${m.id}`));
+  const next = FALLBACKS.find((m) => !tried.has(`${m.provider}/${m.id}`));
+  if (!next) return;
+
+  ctx.ui.notify(`Failing over to ${next.provider}/${next.id}`, "warning");
+  return { model: next };
+});
+```
+
+A successful switch also emits `model_select` with `source: "failover"`. `triedModels` is tracked per run and resets when the retry counter resets (new prompt, successful retry, cancelled retry, or exhausted retries).
 
 #### thinking_level_select
 

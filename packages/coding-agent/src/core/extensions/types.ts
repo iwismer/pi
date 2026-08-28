@@ -824,7 +824,7 @@ export interface ToolExecutionEndEvent {
 // Model Events
 // ============================================================================
 
-export type ModelSelectSource = "set" | "cycle" | "restore";
+export type ModelSelectSource = "set" | "cycle" | "restore" | "failover";
 
 /** Fired when a new model is selected */
 export interface ModelSelectEvent {
@@ -832,6 +832,27 @@ export interface ModelSelectEvent {
 	model: Model<any>;
 	previousModel: Model<any> | undefined;
 	source: ModelSelectSource;
+}
+
+/** Provider/model pair used by model failover. */
+export interface FailoverModelRef {
+	provider: string;
+	id: string;
+}
+
+/** Fired before an auto-retry so extensions can swap in a different model. */
+export interface ModelFailoverEvent {
+	type: "model_failover";
+	/** errorMessage from the failed assistant message */
+	errorMessage: string;
+	/** Upcoming retry attempt number (1-based) */
+	attempt: number;
+	/** Configured retry.maxRetries */
+	maxAttempts: number;
+	/** Model that just failed */
+	model: FailoverModelRef;
+	/** Models already used during this run, including the current one */
+	triedModels: FailoverModelRef[];
 }
 
 /** Fired when a new thinking level is selected */
@@ -1106,6 +1127,7 @@ export type ExtensionEvent =
 	| ToolExecutionUpdateEvent
 	| ToolExecutionEndEvent
 	| ModelSelectEvent
+	| ModelFailoverEvent
 	| ThinkingLevelSelectEvent
 	| UserBashEvent
 	| InputEvent
@@ -1151,6 +1173,11 @@ export interface ToolResultEventResult {
 export interface MessageEndEventResult {
 	/** Replace the finalized message. The replacement must keep the original message role. */
 	message?: AgentMessage;
+}
+
+export interface ModelFailoverEventResult {
+	/** Model to switch to before the retry. Ignored if it cannot be resolved or has no configured auth. */
+	model: FailoverModelRef;
 }
 
 export interface BeforeAgentStartEventResult {
@@ -1294,6 +1321,7 @@ export interface ExtensionAPI {
 	on(event: "tool_execution_update", handler: ExtensionHandler<ToolExecutionUpdateEvent>): void;
 	on(event: "tool_execution_end", handler: ExtensionHandler<ToolExecutionEndEvent>): void;
 	on(event: "model_select", handler: ExtensionHandler<ModelSelectEvent>): void;
+	on(event: "model_failover", handler: ExtensionHandler<ModelFailoverEvent, ModelFailoverEventResult>): void;
 	on(event: "thinking_level_select", handler: ExtensionHandler<ThinkingLevelSelectEvent>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
