@@ -94,6 +94,8 @@ export type {
 	ExtensionUIDialogOptions,
 	ExtensionVirtualModel,
 	ExtensionWidgetOptions,
+	// Events - Model
+	FailoverModelRef,
 	FindToolCallEvent,
 	FindToolResultEvent,
 	GetActiveToolsHandler,
@@ -121,6 +123,8 @@ export type {
 	MessageRenderOptions,
 	MessageStartEvent,
 	MessageUpdateEvent,
+	ModelFailoverEvent,
+	ModelFailoverEventResult,
 	ModelSelectEvent,
 	ModelSelectSource,
 	NormalizedBuildSystemPromptOptions,
