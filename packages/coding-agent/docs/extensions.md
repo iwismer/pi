@@ -116,6 +116,8 @@ Events cover resource discovery, sessions, agent and message lifecycle, provider
 
 `cache_warming_decision` can override an idle prompt-cache refresh with `{ action: "warm" }` or `{ action: "stop" }`. The last handler that returns an action wins.
 
+`model_failover` fires before an auto-retry of a retryable request failure (rate limit, overload, transient server or network error), after the retry budget check and before the retry backoff. Return `{ model: { provider, id } }` to move the retry onto a fallback model, or `undefined` to keep the current model; handlers run in extension load order and the last returned model wins. A returned model that is not in the model registry, or that has no configured auth, is ignored and the current model is kept. A successful switch also emits `model_select` with `source: "failover"`, and tried-model tracking resets with the retry counter (new prompt, successful retry, cancelled retry, or exhausted retries).
+
 Tool calls from one assistant message can run in parallel.
 Do not assume a sibling call or result exists when another tool event runs.
 Use `ctx.signal` for nested work owned by an active turn; commands and idle session events often have no operation signal.
