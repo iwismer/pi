@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, statSync } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { spawn } from "child_process";
@@ -15,6 +15,8 @@ import {
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { BASH_UPDATE_THROTTLE_MS, createShellRenderers } from "./renderers/bash.ts";
+import { resolveToCwd } from "./path-utils.ts";
+import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
 
@@ -37,7 +39,33 @@ function resolveTimeoutMs(timeout: number | undefined): number | undefined {
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Shell command to execute" }),
 	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+	cwd: Type.Optional(
+		Type.String({
+			description:
+				"Working directory for the command, absolute or relative to the session working directory (default: the session working directory). Prefer this over a 'cd <dir> && ...' prefix.",
+		}),
+	),
 });
+
+/**
+ * Resolve a requested working directory against the session cwd and confirm it is
+ * a directory. Without the check, a mistyped or stale path surfaces as a shell or
+ * spawn failure that reads like a failure of the command itself.
+ *
+ * Synchronous so `execute` still emits its first partial update in the same tick
+ * it is called.
+ */
+function resolveRequestedCwd(requestedCwd: string | undefined, sessionCwd: string): string {
+	const trimmed = requestedCwd?.trim();
+	if (!trimmed) return sessionCwd;
+	const resolved = resolveToCwd(trimmed, sessionCwd);
+	try {
+		if (statSync(resolved).isDirectory()) return resolved;
+	} catch {
+		// Reported as the same error as a non-directory below.
+	}
+	throw new Error(`Invalid cwd: "${resolved}" is not an existing directory`);
+}
 
 export const bashToolSystemPromptContribution = {
 	snippet: "Execute bash commands (ls, grep, find, etc.)",
@@ -247,22 +275,23 @@ export function createShellToolDefinition(
 	return {
 		name: config.name,
 		label: config.label,
-		description: `Execute a ${config.shellName} command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		description: `Execute a ${config.shellName} command. Runs in the session working directory unless 'cwd' is provided (absolute, or relative to the session working directory); use 'cwd' instead of a 'cd <dir> && ...' prefix. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
 		promptSnippet: config.promptSnippet,
 		promptGuidelines: exposeSessionEnvironment && config.promptGuidelines ? [...config.promptGuidelines] : undefined,
 		parameters: bashSchema,
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		async execute(
 			_toolCallId,
-			{ command, timeout }: { command: string; timeout?: number },
+			{ command, timeout, cwd: requestedCwd }: { command: string; timeout?: number; cwd?: string },
 			signal?: AbortSignal,
 			onUpdate?,
 			ctx?: ExtensionContext,
 		) {
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
+			const effectiveCwd = resolveRequestedCwd(requestedCwd, ctx?.cwd || cwd);
 			const spawnContext = resolveSpawnContext(
 				resolvedCommand,
-				ctx?.cwd || cwd,
+				effectiveCwd,
 				spawnHook,
 				exposeSessionEnvironment,
 				ctx,
