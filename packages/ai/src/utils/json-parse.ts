@@ -116,6 +116,32 @@ export function markTruncatedJson<T>(value: T): T {
 	return value;
 }
 
+/**
+ * True when `json` stops in the middle of a token: inside a string, or with a
+ * bracket still open. Malformed-but-complete payloads (`{"a":1,}`, `{"a":NaN}`,
+ * trailing junk after a closed object) parse through the same fallback, and
+ * calling those "truncated" tells the model something untrue about its call.
+ */
+function endsMidToken(json: string): boolean {
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+
+	for (const char of json) {
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (char === "\\") escaped = true;
+			else if (char === '"') inString = false;
+			continue;
+		}
+		if (char === '"') inString = true;
+		else if (char === "{" || char === "[") depth++;
+		else if (char === "}" || char === "]") depth--;
+	}
+
+	return inString || depth > 0;
+}
+
 /** True when `value` came from `parseStreamingJson` on an incomplete JSON payload. */
 export function isTruncatedJson(value: unknown): boolean {
 	return typeof value === "object" && value !== null && (value as Record<symbol, unknown>)[TRUNCATED_JSON] === true;
@@ -138,13 +164,13 @@ export function parseStreamingJson<T = Record<string, unknown>>(partialJson: str
 	try {
 		return parseJsonWithRepair<T>(partialJson);
 	} catch {
+		const truncated = endsMidToken(partialJson);
+		const mark = (result: unknown): T => (truncated ? markTruncatedJson((result ?? {}) as T) : ((result ?? {}) as T));
 		try {
-			const result = partialParse(partialJson);
-			return markTruncatedJson((result ?? {}) as T);
+			return mark(partialParse(partialJson));
 		} catch {
 			try {
-				const result = partialParse(repairJson(partialJson));
-				return markTruncatedJson((result ?? {}) as T);
+				return mark(partialParse(repairJson(partialJson)));
 			} catch {
 				return {} as T;
 			}
