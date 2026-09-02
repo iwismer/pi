@@ -75,14 +75,14 @@ function providerError(status: number, message: string): Error {
 	return error;
 }
 
-/** Fake client that fails the first request and records every request it receives. */
-function createFakeClient(firstError: Error): { client: Anthropic; requests: Array<Record<string, any>> } {
+/** Fake client that fails the first request (if given an error) and records every request. */
+function createFakeClient(firstError?: Error): { client: Anthropic; requests: Array<Record<string, any>> } {
 	const requests: Array<Record<string, any>> = [];
 	const client = {
 		messages: {
 			create: (params: Record<string, any>) => {
 				requests.push(params);
-				if (requests.length === 1) {
+				if (firstError && requests.length === 1) {
 					throw firstError;
 				}
 				return { asResponse: async () => createSseResponse() };
@@ -92,9 +92,9 @@ function createFakeClient(firstError: Error): { client: Anthropic; requests: Arr
 	return { client, requests };
 }
 
-function toolWithStrict(strict: "prefer" | "require"): Tool {
+function toolWithStrict(strict: "prefer" | "require", name = "edit"): Tool {
 	return {
-		name: "edit",
+		name,
 		description: "Edit a file.",
 		parameters: Type.Object({
 			path: Type.String(),
@@ -126,6 +126,55 @@ describe("Anthropic compiled-grammar-too-large retry (pc-0094)", () => {
 		expect(requests[1].tools[0].strict).toBeUndefined();
 		// The unconstrained schema keeps the original optionality.
 		expect(requests[1].tools[0].input_schema.required).toEqual(["path", "text"]);
+	});
+
+	it("keeps the rest of the request identical on the retry", async () => {
+		const { client, requests } = createFakeClient(providerError(400, GRAMMAR_TOO_LARGE_MESSAGE));
+
+		await streamAnthropic(model, contextWith([toolWithStrict("prefer", "identity_edit")]), { client }).result();
+
+		expect(requests).toHaveLength(2);
+		const { tools: _firstTools, ...first } = requests[0];
+		const { tools: _secondTools, ...second } = requests[1];
+		expect(second).toEqual(first);
+		expect(requests[1].stream).toBe(requests[0].stream);
+		expect(requests[1].tool_choice).toEqual(requests[0].tool_choice);
+		expect(requests[1].messages).toEqual(requests[0].messages);
+		expect(requests[1].tools.map((tool: { name: string }) => tool.name)).toEqual(
+			requests[0].tools.map((tool: { name: string }) => tool.name),
+		);
+	});
+
+	// Without memoization every later turn re-sent strict tools, ate the same 400, and retried.
+	it("remembers the downgrade for the same model and tool set", async () => {
+		const tools = [toolWithStrict("prefer", "memo_edit")];
+		const first = createFakeClient(providerError(400, GRAMMAR_TOO_LARGE_MESSAGE));
+		await streamAnthropic(model, contextWith(tools), { client: first.client }).result();
+		expect(first.requests).toHaveLength(2);
+
+		// A downgraded request succeeds, so this client never needs to fail.
+		const second = createFakeClient();
+		const result = await streamAnthropic(model, contextWith(tools), { client: second.client }).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(second.requests).toHaveLength(1);
+		expect(second.requests[0].tools[0].strict).toBeUndefined();
+	});
+
+	it("does not apply a remembered downgrade to a different tool set", async () => {
+		const first = createFakeClient(providerError(400, GRAMMAR_TOO_LARGE_MESSAGE));
+		await streamAnthropic(model, contextWith([toolWithStrict("prefer", "scoped_edit")]), {
+			client: first.client,
+		}).result();
+		expect(first.requests).toHaveLength(2);
+
+		const second = createFakeClient(providerError(400, GRAMMAR_TOO_LARGE_MESSAGE));
+		await streamAnthropic(model, contextWith([toolWithStrict("prefer", "scoped_other")]), {
+			client: second.client,
+		}).result();
+
+		expect(second.requests).toHaveLength(2);
+		expect(second.requests[0].tools[0].strict).toBe(true);
 	});
 
 	it("does not retry other 400 errors", async () => {
