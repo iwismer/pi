@@ -584,14 +584,29 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				maxRetries: 0,
 			};
-			const response = await retryProviderRequest(
-				() => client.beta.messages.create(params, requestOptions).asResponse(),
-				{
-					maxRetries: options?.maxRetries,
-					maxRetryDelayMs: options?.maxRetryDelayMs,
-					signal: options?.signal,
-				},
-			);
+			const createResponse = (requestParams: MessageCreateParamsStreaming) =>
+				retryProviderRequest(
+					() => client.beta.messages.create(requestParams, requestOptions).asResponse(),
+					{
+						maxRetries: options?.maxRetries,
+						maxRetryDelayMs: options?.maxRetryDelayMs,
+						signal: options?.signal,
+					},
+				);
+			let response: Response;
+			try {
+				response = await createResponse(params);
+			} catch (error) {
+				if (!isCompiledGrammarTooLargeError(error) || !canRetryWithoutStrictTools(params, normalizedContext)) throw error;
+				// Nothing has been streamed yet, so resending the turn without strict
+				// tools is invisible apart from the lost sampling constraint.
+				params = buildParams(model, normalizedContext, isOAuth, options, true);
+				const nextRetryParams = await options?.onPayload?.(params, model);
+				if (nextRetryParams !== undefined) {
+					params = nextRetryParams as MessageCreateParamsStreaming;
+				}
+				response = await createResponse(params);
+			}
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
@@ -1037,6 +1052,7 @@ function buildParams(
 	context: TranscriptContext,
 	isOAuthToken: boolean,
 	options?: AnthropicOptions,
+	disableStrictTools = false,
 ): MessageCreateParamsStreaming {
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention, options?.env);
 	const compat = getAnthropicCompat(model);
@@ -1111,6 +1127,7 @@ function buildParams(
 		params.temperature = options.temperature;
 	}
 
+	const supportsStrictTools = compat.supportsStrictTools && !disableStrictTools;
 	const toolCacheControl = compat.supportsCacheControlOnTools ? cacheControl : undefined;
 	if (nativeToolChanges) {
 		// Initial tools stay active with the cache breakpoint on the last one. Every later
@@ -1124,7 +1141,7 @@ function buildParams(
 				initialTools,
 				isOAuthToken,
 				compat.supportsEagerToolInputStreaming,
-				compat.supportsStrictTools,
+				supportsStrictTools,
 				toolCacheControl,
 			),
 			DEFERRED_TOOL_PLACEHOLDER,
@@ -1132,7 +1149,7 @@ function buildParams(
 				laterTools,
 				isOAuthToken,
 				compat.supportsEagerToolInputStreaming,
-				compat.supportsStrictTools,
+				supportsStrictTools,
 			).map((tool) => ({ ...tool, defer_loading: true })),
 		];
 	} else {
@@ -1142,7 +1159,7 @@ function buildParams(
 				tools,
 				isOAuthToken,
 				compat.supportsEagerToolInputStreaming,
-				compat.supportsStrictTools,
+				supportsStrictTools,
 				toolCacheControl,
 			);
 		}
@@ -1452,6 +1469,33 @@ function shouldUseFineGrainedToolStreamingBeta(
 	context: TranscriptContext,
 ): boolean {
 	return getCurrentTools(context.messages).length > 0 && !getAnthropicCompat(model).supportsEagerToolInputStreaming;
+}
+
+/**
+ * Anthropic compiles strict tool schemas into a sampling grammar and rejects the
+ * whole request with a 400 when the compiled grammar exceeds its size limit
+ * ("The compiled grammar is too large ... reduce the number of strict tools").
+ * The limit depends on the compiled grammar, which the client cannot measure, so
+ * the provider's own error is the only reliable signal.
+ */
+function isCompiledGrammarTooLargeError(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	const status = (error as { status?: unknown }).status;
+	return status === 400 && /compiled grammar is too large/i.test(error.message);
+}
+
+/**
+ * Strict sampling is an optimization for tools that ask for it with
+ * `strict: "prefer"`, so it can be dropped to get the turn through. Tools that
+ * `require` it must keep it: dropping it would silently change their contract.
+ */
+function canRetryWithoutStrictTools(params: MessageCreateParamsStreaming, context: Context): boolean {
+	const sentStrictTool = params.tools?.some((tool) => (tool as { strict?: unknown }).strict === true) === true;
+	if (!sentStrictTool) return false;
+	return !context.tools?.some((tool) => {
+		const config = tool.constrainedSampling;
+		return config !== false && config?.type === "json_schema" && config.strict === "require";
+	});
 }
 
 function convertTools(
