@@ -574,7 +574,9 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				client = created.client;
 				isOAuth = created.isOAuthToken;
 			}
-			let params = buildParams(model, normalizedContext, isOAuth, options);
+			const downgradeKey = strictToolsDowngradeKey(model, normalizedContext);
+			const downgradedBefore = downgradeKey !== undefined && strictToolsDowngrades.has(downgradeKey);
+			let params = buildParams(model, normalizedContext, isOAuth, options, downgradedBefore);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = { ...(nextParams as MessageCreateParamsStreaming), stream: true };
@@ -585,14 +587,11 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				maxRetries: 0,
 			};
 			const createResponse = (requestParams: MessageCreateParamsStreaming) =>
-				retryProviderRequest(
-					() => client.beta.messages.create(requestParams, requestOptions).asResponse(),
-					{
-						maxRetries: options?.maxRetries,
-						maxRetryDelayMs: options?.maxRetryDelayMs,
-						signal: options?.signal,
-					},
-				);
+				retryProviderRequest(() => client.beta.messages.create(requestParams, requestOptions).asResponse(), {
+					maxRetries: options?.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					signal: options?.signal,
+				});
 			let response: Response;
 			try {
 				response = await createResponse(params);
@@ -600,6 +599,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				if (!isCompiledGrammarTooLargeError(error) || !canRetryWithoutStrictTools(params, normalizedContext)) throw error;
 				// Nothing has been streamed yet, so resending the turn without strict
 				// tools is invisible apart from the lost sampling constraint.
+				if (downgradeKey !== undefined) strictToolsDowngrades.add(downgradeKey);
 				params = buildParams(model, normalizedContext, isOAuth, options, true);
 				const nextRetryParams = await options?.onPayload?.(params, model);
 				if (nextRetryParams !== undefined) {
@@ -1489,6 +1489,30 @@ function isCompiledGrammarTooLargeError(error: unknown): boolean {
  * `strict: "prefer"`, so it can be dropped to get the turn through. Tools that
  * `require` it must keep it: dropping it would silently change their contract.
  */
+/**
+ * Model plus the tool identity that decides the compiled grammar, so a downgrade
+ * learned on one turn is not applied to an unrelated tool set.
+ */
+function strictToolsDowngradeKey(model: Model<"anthropic-messages">, context: Context): string | undefined {
+	if (!context.tools?.length) return undefined;
+	const tools = context.tools
+		.map((tool) => {
+			const config = tool.constrainedSampling;
+			const strict = config !== false && config?.type === "json_schema" ? config.strict : "";
+			return `${tool.name}:${strict}`;
+		})
+		.sort()
+		.join(",");
+	return `${model.provider}/${model.id}\u0000${tools}`;
+}
+
+/**
+ * Grammar size is stable for a given model and tool set, so once Anthropic has
+ * rejected it there is no point re-sending strict tools and eating the same 400
+ * on every later turn of the process.
+ */
+const strictToolsDowngrades = new Set<string>();
+
 function canRetryWithoutStrictTools(params: MessageCreateParamsStreaming, context: Context): boolean {
 	const sentStrictTool = params.tools?.some((tool) => (tool as { strict?: unknown }).strict === true) === true;
 	if (!sentStrictTool) return false;
