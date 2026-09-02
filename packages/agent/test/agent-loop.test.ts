@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import { isTruncatedJson, parseStreamingJson } from "@earendil-works/pi-ai";
 import { agentLoop, agentLoopContinue } from "../src/agent-loop.ts";
 import { setDefaultStreamFn } from "../src/index.ts";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
@@ -581,6 +582,76 @@ describe("agentLoop with AgentMessage", () => {
 		}
 
 		expect(executed).toEqual([[{ oldText: "before", newText: "after" }]]);
+	});
+
+	// prepareArguments returns a fresh object, which used to drop the non-enumerable
+	// truncation marker, so a cut-off legacy edit call lost its "arguments were cut off"
+	// note and read like a malformed tool call.
+	it("should keep the truncation marker across prepareArguments", async () => {
+		const replaceSchema = Type.Object({ oldText: Type.String(), newText: Type.String() });
+		const toolSchema = Type.Object({ path: Type.String(), edits: Type.Array(replaceSchema) });
+		const tool: AgentTool<typeof toolSchema, { count: number }> = {
+			name: "edit",
+			label: "Edit",
+			description: "Edit tool",
+			parameters: toolSchema,
+			prepareArguments(args) {
+				const { oldText, newText, ...rest } = args as Record<string, unknown>;
+				if (typeof oldText !== "string" || typeof newText !== "string") {
+					return args as { path: string; edits: { oldText: string; newText: string }[] };
+				}
+				return { ...rest, edits: [{ oldText, newText }] } as {
+					path: string;
+					edits: { oldText: string; newText: string }[];
+				};
+			},
+			async execute() {
+				return { content: [{ type: "text", text: "edited" }], details: { count: 1 } };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+
+		// Legacy-shaped call cut off before "path" arrived.
+		const truncatedArguments = parseStreamingJson<Record<string, unknown>>(
+			'{"oldText": "before", "newText": "after", "pa',
+		);
+		expect(isTruncatedJson(truncatedArguments)).toBe(true);
+
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					const message = createAssistantMessage(
+						[{ type: "toolCall", id: "tool-1", name: "edit", arguments: truncatedArguments }],
+						"toolUse",
+					);
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const errors: string[] = [];
+		const stream = agentLoop([createUserMessage("edit something")], context, config, undefined, streamFn);
+		for await (const event of stream) {
+			if (event.type === "tool_execution_end" && event.isError) {
+				for (const block of event.result.content) {
+					if (block.type === "text") errors.push(block.text);
+				}
+			}
+		}
+
+		expect(errors.join("\n")).toContain("cut off");
 	});
 
 	it("should emit tool_execution_end in completion order but persist tool results in source order", async () => {

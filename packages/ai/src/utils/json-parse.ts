@@ -104,7 +104,12 @@ export function parseJsonWithRepair<T>(json: string): T {
  */
 const TRUNCATED_JSON = Symbol.for("pi.ai.truncatedJson");
 
-function markTruncatedJson<T>(value: T): T {
+/**
+ * Re-apply the truncation mark to a value derived from a marked one. Needed by
+ * consumers that rebuild arguments (for example tool `prepareArguments`), since
+ * spreading drops the non-enumerable marker.
+ */
+export function markTruncatedJson<T>(value: T): T {
 	if (typeof value === "object" && value !== null) {
 		Object.defineProperty(value, TRUNCATED_JSON, { value: true, enumerable: false, configurable: true });
 	}

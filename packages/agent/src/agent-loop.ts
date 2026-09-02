@@ -7,6 +7,8 @@ import {
 	type AssistantMessage,
 	type Context,
 	EventStream,
+	isTruncatedJson,
+	markTruncatedJson,
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
@@ -597,6 +599,11 @@ function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall)
 	const preparedArguments = tool.prepareArguments(toolCall.arguments);
 	if (preparedArguments === toolCall.arguments) {
 		return toolCall;
+	}
+	// The truncation mark is non-enumerable, so rebuilding the arguments drops it and
+	// validation would stop explaining that the call was cut off mid-stream.
+	if (isTruncatedJson(toolCall.arguments)) {
+		markTruncatedJson(preparedArguments);
 	}
 	return {
 		...toolCall,
