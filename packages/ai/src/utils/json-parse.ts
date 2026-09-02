@@ -95,8 +95,32 @@ export function parseJsonWithRepair<T>(json: string): T {
 }
 
 /**
+ * Marks a value that was reconstructed from incomplete JSON. `partial-json`
+ * returns the well-formed prefix of a cut-off payload, so trailing properties
+ * vanish without any parse error. Consumers use this to tell "the model sent bad
+ * arguments" apart from "the arguments never finished arriving".
+ *
+ * Non-enumerable, so it never reaches JSON.stringify or session storage.
+ */
+const TRUNCATED_JSON = Symbol.for("pi.ai.truncatedJson");
+
+function markTruncatedJson<T>(value: T): T {
+	if (typeof value === "object" && value !== null) {
+		Object.defineProperty(value, TRUNCATED_JSON, { value: true, enumerable: false, configurable: true });
+	}
+	return value;
+}
+
+/** True when `value` came from `parseStreamingJson` on an incomplete JSON payload. */
+export function isTruncatedJson(value: unknown): boolean {
+	return typeof value === "object" && value !== null && (value as Record<symbol, unknown>)[TRUNCATED_JSON] === true;
+}
+
+/**
  * Attempts to parse potentially incomplete JSON during streaming.
  * Always returns a valid object, even if the JSON is incomplete.
+ *
+ * Results reconstructed from incomplete JSON are marked; see `isTruncatedJson`.
  *
  * @param partialJson The partial JSON string from streaming
  * @returns Parsed object or empty object if parsing fails
@@ -111,11 +135,11 @@ export function parseStreamingJson<T = Record<string, unknown>>(partialJson: str
 	} catch {
 		try {
 			const result = partialParse(partialJson);
-			return (result ?? {}) as T;
+			return markTruncatedJson((result ?? {}) as T);
 		} catch {
 			try {
 				const result = partialParse(repairJson(partialJson));
-				return (result ?? {}) as T;
+				return markTruncatedJson((result ?? {}) as T);
 			} catch {
 				return {} as T;
 			}
