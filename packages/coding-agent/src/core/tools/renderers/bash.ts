@@ -40,12 +40,19 @@ function formatDuration(ms: number): string {
 
 	return `${Math.floor(minutes / 60)}h ${minutes % 60}m ${remainder}s`;
 }
-function formatShellCall(args: { command?: string; timeout?: number } | undefined, prompt: string): string {
+function formatShellCall(
+	args: { command?: string; timeout?: number; cwd?: string } | undefined,
+	prompt: string,
+): string {
 	const command = str(args?.command);
 	const timeout = args?.timeout as number | undefined;
-	const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
+	const requestedCwd = str(args?.cwd);
+	const suffixParts: string[] = [];
+	if (requestedCwd) suffixParts.push(`cwd ${requestedCwd}`);
+	if (timeout) suffixParts.push(`timeout ${timeout}s`);
+	const suffix = suffixParts.length > 0 ? theme.fg("muted", ` (${suffixParts.join(", ")})`) : "";
 	const commandDisplay = command === null ? invalidArgText(theme) : command ? command : theme.fg("toolOutput", "...");
-	return theme.fg("toolTitle", theme.bold(`${prompt} ${commandDisplay}`)) + timeoutSuffix;
+	return theme.fg("toolTitle", theme.bold(`${prompt} ${commandDisplay}`)) + suffix;
 }
 function rebuildBashResultRenderComponent(
 	component: BashResultRenderComponent,
