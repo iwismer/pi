@@ -106,6 +106,8 @@ Events cover resource discovery, sessions, agent and message lifecycle, provider
 
 `message_end` can replace a finalized message while preserving its role. `tool_call` can mutate input or block execution. `tool_result` handlers compose, with each handler seeing prior changes.
 
+Approval gates for `bash` and `powershell` must inspect `event.input.cwd`, not just `event.input.command`. `cwd` decides where the command runs (absolute, or relative to the session working directory), so `rm -rf ./build` deletes a different directory depending on it. A gate that matches only on the command text approves less than it thinks.
+
 <a id="context_with_system"></a>
 
 `context` transforms conversation messages without prompt and tool system messages; Pi restores that state afterward. Use `context_with_system` only when a request-local transformation must own the complete transcript, and keep a system message at index zero.
