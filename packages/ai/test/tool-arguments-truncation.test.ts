@@ -132,6 +132,22 @@ describe("truncated tool call arguments (pc-0025)", () => {
 		expect(isTruncatedJson(parseStreamingJson(fullEditArguments))).toBe(false);
 	});
 
+	// Malformed-but-complete payloads also take the partial-json fallback. Marking them
+	// truncated told the model its arguments were cut off when nothing was.
+	it.each([['{"a":1,}'], ['{"a":NaN}'], ['{"a":1} oops'], ['{"a":1}{"b":2}']])(
+		"does not mark complete but malformed payload %s",
+		(payload) => {
+			expect(isTruncatedJson(parseStreamingJson(payload))).toBe(false);
+		},
+	);
+
+	it.each([['{"a":1, "b"'], ['{"a": "unterminated'], ['{"a": [1, 2'], ['{"a": tru']])(
+		"marks payload %s that ends mid-token",
+		(payload) => {
+			expect(isTruncatedJson(parseStreamingJson(payload))).toBe(true);
+		},
+	);
+
 	it("explains the truncation instead of only reporting the missing property", () => {
 		const toolCall: ToolCall = {
 			type: "toolCall",
