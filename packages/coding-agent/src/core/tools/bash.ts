@@ -1,5 +1,4 @@
-import { constants, statSync } from "node:fs";
-import { access as fsAccess } from "node:fs/promises";
+import { stat as fsStat } from "node:fs/promises";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { spawn } from "child_process";
@@ -19,7 +18,7 @@ import {
 import { getExperimentalToolSampling } from "../experimental.ts";
 import type { ExtensionContext, ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
-import { resolveToCwd } from "./path-utils.ts";
+import { resolvePath } from "../../utils/paths.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
@@ -46,29 +45,22 @@ const bashSchema = Type.Object({
 	cwd: Type.Optional(
 		Type.String({
 			description:
-				"Working directory for the command, absolute or relative to the session working directory (default: the session working directory). Prefer this over a 'cd <dir> && ...' prefix.",
+				"Working directory for the command, absolute or relative to the session working directory (default: the session working directory). Prefer this over changing directory as part of the command itself.",
 		}),
 	),
 });
 
 /**
- * Resolve a requested working directory against the session cwd and confirm it is
- * a directory. Without the check, a mistyped or stale path surfaces as a shell or
- * spawn failure that reads like a failure of the command itself.
+ * Resolve a requested working directory against the session cwd.
  *
- * Synchronous so `execute` still emits its first partial update in the same tick
- * it is called.
+ * Deliberately does no filesystem check: `BashOperations` can execute remotely,
+ * where the path only has to exist on the far side. Local existence validation
+ * lives in `createLocalShellOperations`.
  */
 function resolveRequestedCwd(requestedCwd: string | undefined, sessionCwd: string): string {
 	const trimmed = requestedCwd?.trim();
 	if (!trimmed) return sessionCwd;
-	const resolved = resolveToCwd(trimmed, sessionCwd);
-	try {
-		if (statSync(resolved).isDirectory()) return resolved;
-	} catch {
-		// Reported as the same error as a non-directory below.
-	}
-	throw new Error(`Invalid cwd: "${resolved}" is not an existing directory`);
+	return resolvePath(trimmed, sessionCwd, { normalizeUnicodeSpaces: true });
 }
 
 export const bashToolSystemPromptContribution = {
@@ -116,10 +108,16 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				throw new Error("aborted");
 			}
 			const shellConfig = resolveShellConfig();
+			let cwdIsDirectory = false;
 			try {
-				await fsAccess(cwd, constants.F_OK);
+				cwdIsDirectory = (await fsStat(cwd)).isDirectory();
 			} catch {
-				throw new Error(`Working directory does not exist: ${cwd}\nCannot execute ${shellName} commands.`);
+				// Reported as the same error as a non-directory below.
+			}
+			if (!cwdIsDirectory) {
+				throw new Error(
+					`Invalid cwd: "${cwd}" is not an existing directory\nCannot execute ${shellName} commands.`,
+				);
 			}
 
 			const commandFromStdin = shellConfig.commandTransport === "stdin";
@@ -397,7 +395,7 @@ export function createShellToolDefinition(
 	return {
 		name: config.name,
 		label: config.label,
-		description: `Execute a ${config.shellName} command. Runs in the session working directory unless 'cwd' is provided (absolute, or relative to the session working directory); use 'cwd' instead of a 'cd <dir> && ...' prefix. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		description: `Execute a ${config.shellName} command. Runs in the session working directory unless 'cwd' is provided (absolute, or relative to the session working directory); use 'cwd' instead of changing directory as part of the command itself. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
 		promptSnippet: config.promptSnippet,
 		promptGuidelines: exposeSessionEnvironment && config.promptGuidelines ? [...config.promptGuidelines] : undefined,
 		parameters: bashSchema,

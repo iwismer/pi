@@ -545,7 +545,7 @@ describe("Coding Agent Tools", () => {
 			const bashToolWithBadCwd = createBashTool(nonexistentCwd);
 
 			await expect(bashToolWithBadCwd.execute("test-call-11", { command: "echo test" })).rejects.toThrow(
-				/Working directory does not exist/,
+				/is not an existing directory/,
 			);
 		});
 
