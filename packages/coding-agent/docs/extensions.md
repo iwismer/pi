@@ -824,6 +824,7 @@ Behavior guarantees:
 - No re-validation is performed after your mutation
 - Return values from `tool_call` control blocking via `{ block: true, reason?: string, terminate?: boolean }`
 - `terminate` only applies to a blocked call; the agent stops early only when every finalized result in the batch is terminating
+- Approval gates for `bash` and `powershell` must inspect `event.input.cwd`, not just `event.input.command`. `cwd` decides where the command runs (absolute, or relative to the session working directory), so `rm -rf ./build` deletes a different directory depending on it. A gate that matches only on the command text approves less than it thinks.
 
 ```typescript
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
@@ -835,7 +836,7 @@ pi.on("tool_call", async (event, ctx) => {
 
   // Built-in tools: no type params needed
   if (isToolCallEventType("bash", event)) {
-    // event.input is { command: string; timeout?: number }
+    // event.input is { command: string; timeout?: number; cwd?: string }
     event.input.command = `source ~/.profile\n${event.input.command}`;
 
     if (event.input.command.includes("rm -rf")) {
