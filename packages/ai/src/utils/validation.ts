@@ -2,6 +2,7 @@ import { Compile } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import { Value } from "typebox/value";
 import type { Tool, ToolCall } from "../types.ts";
+import { isTruncatedJson } from "./json-parse.ts";
 
 const validatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
 const TYPEBOX_KIND = Symbol.for("TypeBox.Kind");
@@ -344,7 +345,12 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 			.map((error) => `  - ${formatValidationPath(error)}: ${error.message}`)
 			.join("\n") || "Unknown validation error";
 
-	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${errors}\n\nReceived arguments:\n${JSON.stringify(toolCall.arguments, null, 2)}`;
+	// A cut-off argument stream loses its trailing properties before validation runs,
+	// so the schema errors below describe a symptom, not a malformed tool call.
+	const truncationNote = isTruncatedJson(toolCall.arguments)
+		? `\n\nThese arguments were truncated: the argument JSON was cut off mid-payload (interrupted stream or output token limit), so trailing properties never arrived and are missing from the arguments below. This is not a typo in the call: retry it, splitting large payloads into smaller calls if it keeps happening.`
+		: "";
+	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${errors}${truncationNote}\n\nReceived arguments:\n${JSON.stringify(toolCall.arguments, null, 2)}`;
 
 	throw new Error(errorMessage);
 }
