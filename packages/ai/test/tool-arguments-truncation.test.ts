@@ -17,8 +17,9 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { stream as streamAnthropic } from "../src/api/anthropic-messages.ts";
 import { getModel } from "../src/compat.ts";
-import type { Context, Tool, ToolCall } from "../src/types.ts";
+import type { Tool, ToolCall, TranscriptContext } from "../src/types.ts";
 import { isTruncatedJson, parseStreamingJson } from "../src/utils/json-parse.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 import { validateToolArguments } from "../src/utils/validation.ts";
 
 const editTool: Tool = {
@@ -107,10 +108,10 @@ function anthropicToolCallEvents(partialJson: string, stopReason: string): Array
 
 async function streamToolCall(partialJson: string, stopReason: string): Promise<ToolCall | undefined> {
 	const model = getModel("anthropic", "claude-haiku-4-5");
-	const context: Context = {
+	const context: TranscriptContext = normalizeContext({
 		messages: [{ role: "user", content: "Use the edit tool.", timestamp: Date.now() }],
 		tools: [editTool],
-	};
+	});
 	const stream = streamAnthropic(model, context, {
 		client: createFakeAnthropicClient(createSseResponse(anthropicToolCallEvents(partialJson, stopReason))),
 	});

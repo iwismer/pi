@@ -660,7 +660,8 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			try {
 				response = await createResponse(params);
 			} catch (error) {
-				if (!isCompiledGrammarTooLargeError(error) || !canRetryWithoutStrictTools(params, normalizedContext)) throw error;
+				if (!isCompiledGrammarTooLargeError(error) || !canRetryWithoutStrictTools(params, normalizedContext))
+					throw error;
 				// Nothing has been streamed yet, so resending the turn without strict
 				// tools is invisible apart from the lost sampling constraint.
 				if (downgradeKey !== undefined) strictToolsDowngrades.add(downgradeKey);
@@ -1236,12 +1237,9 @@ function buildParams(
 				toolCacheControl,
 			),
 			DEFERRED_TOOL_PLACEHOLDER,
-			...convertTools(
-				laterTools,
-				isOAuthToken,
-				compat.supportsEagerToolInputStreaming,
-				supportsStrictTools,
-			).map((tool) => ({ ...tool, defer_loading: true })),
+			...convertTools(laterTools, isOAuthToken, compat.supportsEagerToolInputStreaming, supportsStrictTools).map(
+				(tool) => ({ ...tool, defer_loading: true }),
+			),
 		];
 	} else {
 		const tools = getCurrentTools(context.messages);
@@ -1620,9 +1618,9 @@ function isCompiledGrammarTooLargeError(error: unknown): boolean {
  * learned on one turn is not applied to an unrelated tool set.
  */
 function strictToolsDowngradeKey(model: Model<"anthropic-messages">, context: TranscriptContext): string | undefined {
-	const currentTools = getCurrentTools(context.messages);
-	if (!currentTools.length) return undefined;
-	const tools = currentTools
+	const contextTools = getCurrentTools(context.messages);
+	if (!contextTools.length) return undefined;
+	const tools = contextTools
 		.map((tool) => {
 			const config = tool.constrainedSampling;
 			const strict = config !== false && config?.type === "json_schema" ? config.strict : "";
