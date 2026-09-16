@@ -19,7 +19,8 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { stream as streamAnthropic } from "../src/api/anthropic-messages.ts";
 import { getModel } from "../src/compat.ts";
-import type { Context, Tool } from "../src/types.ts";
+import type { Tool, TranscriptContext } from "../src/types.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 
 const GRAMMAR_TOO_LARGE_MESSAGE =
 	"400 invalid_request_error: The compiled grammar is too large, which would cause performance issues. " +
@@ -107,11 +108,11 @@ function toolWithStrict(strict: "prefer" | "require", name = "edit"): Tool {
 	};
 }
 
-function contextWith(tools: Tool[]): Context {
-	return {
+function contextWith(tools: Tool[]): TranscriptContext {
+	return normalizeContext({
 		messages: [{ role: "user", content: "Use the edit tool.", timestamp: Date.now() }],
 		tools,
-	};
+	});
 }
 
 const model = getModel("anthropic", "claude-haiku-4-5");

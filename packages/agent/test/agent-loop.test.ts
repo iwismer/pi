@@ -645,7 +645,7 @@ describe("agentLoop with AgentMessage", () => {
 			},
 		};
 
-		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const context: AgentContext = { messages: [], tools: [tool] };
 		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
 
 		// Legacy-shaped call cut off before "path" arrived.

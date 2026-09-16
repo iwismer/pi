@@ -596,7 +596,8 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			try {
 				response = await createResponse(params);
 			} catch (error) {
-				if (!isCompiledGrammarTooLargeError(error) || !canRetryWithoutStrictTools(params, normalizedContext)) throw error;
+				if (!isCompiledGrammarTooLargeError(error) || !canRetryWithoutStrictTools(params, normalizedContext))
+					throw error;
 				// Nothing has been streamed yet, so resending the turn without strict
 				// tools is invisible apart from the lost sampling constraint.
 				if (downgradeKey !== undefined) strictToolsDowngrades.add(downgradeKey);
@@ -1145,12 +1146,9 @@ function buildParams(
 				toolCacheControl,
 			),
 			DEFERRED_TOOL_PLACEHOLDER,
-			...convertTools(
-				laterTools,
-				isOAuthToken,
-				compat.supportsEagerToolInputStreaming,
-				supportsStrictTools,
-			).map((tool) => ({ ...tool, defer_loading: true })),
+			...convertTools(laterTools, isOAuthToken, compat.supportsEagerToolInputStreaming, supportsStrictTools).map(
+				(tool) => ({ ...tool, defer_loading: true }),
+			),
 		];
 	} else {
 		const tools = getCurrentTools(context.messages);
@@ -1493,9 +1491,10 @@ function isCompiledGrammarTooLargeError(error: unknown): boolean {
  * Model plus the tool identity that decides the compiled grammar, so a downgrade
  * learned on one turn is not applied to an unrelated tool set.
  */
-function strictToolsDowngradeKey(model: Model<"anthropic-messages">, context: Context): string | undefined {
-	if (!context.tools?.length) return undefined;
-	const tools = context.tools
+function strictToolsDowngradeKey(model: Model<"anthropic-messages">, context: TranscriptContext): string | undefined {
+	const contextTools = getCurrentTools(context.messages);
+	if (!contextTools.length) return undefined;
+	const tools = contextTools
 		.map((tool) => {
 			const config = tool.constrainedSampling;
 			const strict = config !== false && config?.type === "json_schema" ? config.strict : "";
@@ -1513,10 +1512,10 @@ function strictToolsDowngradeKey(model: Model<"anthropic-messages">, context: Co
  */
 const strictToolsDowngrades = new Set<string>();
 
-function canRetryWithoutStrictTools(params: MessageCreateParamsStreaming, context: Context): boolean {
+function canRetryWithoutStrictTools(params: MessageCreateParamsStreaming, context: TranscriptContext): boolean {
 	const sentStrictTool = params.tools?.some((tool) => (tool as { strict?: unknown }).strict === true) === true;
 	if (!sentStrictTool) return false;
-	return !context.tools?.some((tool) => {
+	return !getCurrentTools(context.messages).some((tool) => {
 		const config = tool.constrainedSampling;
 		return config !== false && config?.type === "json_schema" && config.strict === "require";
 	});
