@@ -3,6 +3,7 @@ import {
 	type AssistantMessageEvent,
 	EventStream,
 	isTruncatedJson,
+	type JsonObject,
 	type Message,
 	type Model,
 	parseStreamingJson,
@@ -649,9 +650,7 @@ describe("agentLoop with AgentMessage", () => {
 		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
 
 		// Legacy-shaped call cut off before "path" arrived.
-		const truncatedArguments = parseStreamingJson<Record<string, unknown>>(
-			'{"oldText": "before", "newText": "after", "pa',
-		);
+		const truncatedArguments = parseStreamingJson<JsonObject>('{"oldText": "before", "newText": "after", "pa');
 		expect(isTruncatedJson(truncatedArguments)).toBe(true);
 
 		let callIndex = 0;

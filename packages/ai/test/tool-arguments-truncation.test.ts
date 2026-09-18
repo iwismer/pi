@@ -189,7 +189,8 @@ describe("truncated tool call arguments (pc-0025)", () => {
 	it("marks a truncated Anthropic tool call so validation can explain it", async () => {
 		const toolCall = await streamToolCall(truncatedEditArguments, "max_tokens");
 		expect(toolCall).toBeDefined();
-		expect(toolCall?.arguments.edits[0].newText).toBeUndefined();
+		const edits = toolCall?.arguments.edits as Array<{ newText?: string }> | undefined;
+		expect(edits?.[0]?.newText).toBeUndefined();
 		expect(isTruncatedJson(toolCall?.arguments)).toBe(true);
 		expect(() => validateToolArguments(editTool, toolCall as ToolCall)).toThrow(/truncated/i);
 	});
