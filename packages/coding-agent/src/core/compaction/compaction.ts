@@ -944,15 +944,15 @@ const TURN_PREFIX_SUMMARIZATION_PROMPT = `The messages above are earlier context
 Create a concise checkpoint of the user's request and the progress shown above. This checkpoint will be placed before the later messages so the conversation can continue with the necessary context.
 
 ## Original Request
-[What did the user ask for?]
+[Quote the user's most recent explicit request in these messages verbatim, inside quotation marks. If it refers to earlier context ("the current task", "it", "the stack"), keep the reference and state only what the messages above establish that it refers to. Never name a specific ticket, task, worktree, or branch that the user did not name.]
 
 ## Progress So Far
 - [Key decisions and work completed in these messages]
 
 ## Context Needed to Continue
-- [Information from these messages needed to understand the later work]
+- [Information from these messages needed to understand the later work. Distinguish the workspace or ticket where work was observed from the one the user asked for: exploring a dependency can dominate these messages without being the task. Never present an inferred target as user intent.]
 
-Only summarize information explicitly present above. Do not infer or recreate later messages.`;
+Only summarize information explicitly present above. Do not infer or recreate later messages. If the request is ambiguous, preserve the ambiguity rather than resolving it to a specific task.`;
 
 /**
  * Generate summaries for compaction using prepared data.
@@ -1027,6 +1027,7 @@ export async function compact(
 			retry,
 			callbacks,
 			sessionId,
+			customInstructions,
 		);
 		// Merge into single summary
 		summary = `${historyText}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult.text}`;
@@ -1086,6 +1087,7 @@ async function generateTurnPrefixSummary(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
+	customInstructions?: string,
 ): Promise<{ text: string; usage: Usage }> {
 	const maxTokens = Math.min(
 		Math.floor(0.5 * reserveTokens),
@@ -1093,7 +1095,11 @@ async function generateTurnPrefixSummary(
 	); // Smaller budget for turn prefix
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
-	const promptText = `# Conversation\n${conversationText}\n\n# Instructions\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
+	let instructions = TURN_PREFIX_SUMMARIZATION_PROMPT;
+	if (customInstructions) {
+		instructions = `${instructions}\n\nAdditional focus: ${customInstructions}`;
+	}
+	const promptText = `# Conversation\n${conversationText}\n\n# Instructions\n${instructions}`;
 
 	const response = await completeSummarization(
 		model,

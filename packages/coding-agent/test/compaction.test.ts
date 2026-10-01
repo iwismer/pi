@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { createAssistantMessageEventStream, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai/compat";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { readFileSync } from "fs";
@@ -593,6 +594,90 @@ describe("Large session fixture", () => {
 
 		expect(loaded.messages.length).toBeGreaterThan(100);
 		expect(loaded.model).not.toBeNull();
+	});
+});
+
+// ============================================================================
+// Turn prefix summarization (split-turn checkpoint)
+// ============================================================================
+
+describe("turn prefix summarization", () => {
+	it("anchors task identity to the user's words and receives customInstructions", async () => {
+		const oldUser = createMessageEntry(createUserMessage("old history"));
+		const oldAssistant = createMessageEntry(createAssistantMessage("old answer"));
+		const currentUser = createMessageEntry(createUserMessage("read the large file"));
+		const toolCall = createMessageEntry({
+			...createAssistantMessage(""),
+			content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "big.txt" } }],
+			stopReason: "toolUse",
+		});
+		const toolResult = createMessageEntry({
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			content: [{ type: "text", text: "x".repeat(8000) }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		const entries = [oldUser, oldAssistant, currentUser, toolCall, toolResult];
+		const preparation = prepareCompaction(entries, {
+			...DEFAULT_COMPACTION_SETTINGS,
+			keepRecentTokens: 1000,
+		});
+		expect(preparation?.isSplitTurn).toBe(true);
+
+		// Capture the summarizer prompts without a real API: the turn-prefix
+		// checkpoint generated from a misattributed task is what derailed a
+		// post-compaction resume (wrong ticket/worktree read as authoritative).
+		const prompts: string[] = [];
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const streamFn = async (_model: unknown, context: { messages: any[] }) => {
+			prompts.push(
+				(context.messages ?? [])
+					.map((m: { content: unknown }) =>
+						typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+					)
+					.join("\n"),
+			);
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => {
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: {
+						...fauxAssistantMessage("summary"),
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: createMockUsage(10, 5),
+					},
+				});
+			});
+			return stream;
+		};
+
+		const result = await compact(
+			preparation!,
+			model,
+			undefined,
+			undefined,
+			"Preserve the current task state",
+			undefined,
+			undefined,
+			streamFn,
+		);
+		expect(result.summary).toContain("Turn Context (split turn)");
+
+		const prefixPrompt = prompts.find((p) => p.includes("## Original Request"));
+		expect(prefixPrompt).toBeDefined();
+		// Task identity must stay anchored to the user's words...
+		expect(prefixPrompt).toContain("verbatim");
+		expect(prefixPrompt).toContain("Never name a specific ticket");
+		// ...observed workspace must not be presented as the requested target...
+		expect(prefixPrompt).toContain("Never present an inferred target as user intent");
+		// ...and extension custom instructions must reach the split-turn checkpoint
+		// (they previously only reached the history summary).
+		expect(prefixPrompt).toContain("Additional focus: Preserve the current task state");
 	});
 });
 
